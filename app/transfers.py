@@ -12,6 +12,7 @@ from pathlib import Path
 
 from app.data import DataService, FUNCTIONS
 from app.database import SkillRegistry
+from app.merge import merge_snapshot
 from app.observability import audit_actor, request_id, trace_operation, event
 
 MAX_SQL_BYTES = 2 * 1024 * 1024
@@ -171,8 +172,9 @@ class SQLTransfers:
                 elif row['type'] != 'index' or not allowed_table(row['tbl_name']):
                     raise ValueError('Project contains unsupported tables, views, or triggers; use an offline backup')
             for table in tables:
-                cursor = connection.execute(f'SELECT * FROM "{table}"')
-                columns = [column[0] for column in cursor.description]
+                columns = [column['name'] for column in connection.execute('SELECT * FROM pragma_table_xinfo(?)',(table,)) if column['hidden']==0]
+                selected = ','.join('"'+column.replace('"','""')+'"' for column in columns)
+                cursor = connection.execute(f'SELECT {selected} FROM "{table}"')
                 quoted = ','.join('"' + column.replace('"', '""') + '"' for column in columns)
                 for row in cursor:
                     count += 1
@@ -192,18 +194,20 @@ class SQLTransfers:
         _, token, expires = self.store.create('export', self.project, payload)
         return {'status': 'download_ready', 'filename': f'{self.project}.sql', 'download_url': f'{self.settings.public_url}/files/download#{token}', 'expires_at': expires, 'byte_count': len(payload), 'sha256': hashlib.sha256(payload).hexdigest(), 'row_count': count, 'tables': tables, 'message': 'Full project SQL: schema, skills, data, audit history, and receipts. Download link expires in 15 minutes. OAuth settings and transfer credentials are excluded.'}
 
-    def prepare_import(self):
+    def prepare_import(self, mode="restore"):
         identifier, token, expires = self.store.create('import', self.project)
-        return {'status': 'awaiting_upload', 'import_id': identifier, 'upload_url': f'{self.settings.public_url}/files/upload#{token}', 'expires_at': expires, 'message': 'Open this link to upload a full project .sql file. Upload only stages it. Call import_sql with this import_id to preview, then apply=true only after user authorization to replace this project.'}
+        return {'status': 'awaiting_upload', 'import_id': identifier, 'upload_url': f'{self.settings.public_url}/files/upload#{token}', 'expires_at': expires, 'mode': mode, 'message': 'Upload only stages a snapshot. Call import_sql with this import_id and the selected mode to preview. Apply only after user authorization. Restore replaces the project; merge preserves existing rows and reports conflicts.'}
 
     @trace_operation
-    def import_file(self, import_id=None, sql_content=None, apply=False):
+    def import_file(self, import_id=None, sql_content=None, apply=False, mode="restore", preview_hash=None):
+        if mode not in {"restore", "merge"}:
+            raise ValueError("mode must be restore or merge")
         if import_id and sql_content is not None:
             raise ValueError('Supply import_id or sql_content, not both')
         if not import_id and sql_content is None:
             if apply:
                 raise ValueError('Provide an import_id to apply')
-            return self.prepare_import()
+            return self.prepare_import(mode)
         if sql_content is not None:
             if apply:
                 raise ValueError('Stage and preview SQL first, then apply using its import_id')
@@ -212,7 +216,7 @@ class SQLTransfers:
             import_id, _, _ = self.store.create('import', self.project, payload)
         record = self.store.lookup(identifier=import_id, kind='import', project=self.project)
         if record['payload'] is None:
-            return {'status': 'awaiting_upload', 'import_id': import_id, 'message': 'File not uploaded yet; use the upload link returned when this import was created.'}
+            return {'status': 'awaiting_upload', 'mode': mode, 'import_id': import_id, 'message': 'File not uploaded yet; use the upload link returned when this import was created.'}
         payload = bytes(record['payload'])
         text = payload.decode('utf-8-sig')
         statements = split_sql(text)
@@ -268,7 +272,7 @@ class SQLTransfers:
             if any(row['type'] not in {'table','index'} or not allowed_table(row['tbl_name']) for row in schema):
                 raise ValueError('Unsupported schema in project SQL')
             with self.registry.connect() as destination:
-                existing = destination.execute('SELECT response FROM system_sql_imports WHERE import_id=?', (import_id,)).fetchone()
+                existing = destination.execute('SELECT response FROM system_sql_imports WHERE import_id=?', ((('merge:' if mode=='merge' else '') + import_id),)).fetchone()
                 if existing:
                     return {**json.loads(existing[0]), 'replayed': True}
                 expected = {row['name']: normalized_schema(row['sql']) for row in destination.execute("SELECT name,sql FROM sqlite_schema WHERE type='table'") if row['name'] in SYSTEM_TABLES}
@@ -295,8 +299,10 @@ class SQLTransfers:
                 restored_records = stage.execute("SELECT sql FROM sqlite_schema WHERE name='data_records'").fetchone()[0]
                 if normalized_schema(expected_records) != normalized_schema(restored_records):
                     raise ValueError('Incompatible data_records schema')
+                if mode == 'merge':
+                    return merge_snapshot(stage,destination,self.registry.path,import_id,digest,apply,preview_hash)
                 count = sum(stage.execute(f'SELECT count(*) FROM "{table}"').fetchone()[0] for table in tables)
-                result = {'status': 'restored' if apply else 'preview', 'import_id': import_id, 'sha256': digest, 'row_count': count, 'tables': tables, 'replayed': False, 'message': 'Entire project restored; snapshot audit history retained and restore event appended.' if apply else 'Validation passed. No changes saved. apply=true will REPLACE this project, including current skills, data, audit history, and receipts, with this snapshot.'}
+                result = {'mode':'restore', 'status': 'restored' if apply else 'preview', 'import_id': import_id, 'sha256': digest, 'row_count': count, 'tables': tables, 'replayed': False, 'message': 'Entire project restored; snapshot audit history retained and restore event appended.' if apply else 'Validation passed. No changes saved. apply=true will REPLACE this project, including current skills, data, audit history, and receipts, with this snapshot.'}
                 if not apply:
                     return result
                 stage.execute('INSERT INTO audit_mutations(batch_id,statement_index,actor,request_id,sql,params,changed_rows) VALUES (?,0,?,?,?,?,?)', (uuid.uuid4().hex, audit_actor.get(), request_id.get(), '-- Full SQL restore ' + digest, json.dumps({'import_id': import_id, 'sha256': digest, 'tables': tables}), count))

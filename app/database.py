@@ -199,5 +199,7 @@ class SkillRegistry:
             "Read audit_mutations with db_query; generic SQL cannot change skills, audit, or schema. "
             "Verify writes with db_query, and report when results are truncated. "
             "export_sql provides a full project .sql download. import_sql prepares an upload or previews a staged file; "
-            "apply=true replaces the entire project snapshot after explicit user authorization.\n"
+            "mode=restore with apply=true replaces the entire project snapshot after explicit user authorization. "
+            "mode=merge previews insert-only application records and skills, preserving existing values and history; "
+            "conflicts block apply. Applying a reviewed merge requires mode=merge and its preview_hash.\n"
         )

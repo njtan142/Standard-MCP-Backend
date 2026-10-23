@@ -374,3 +374,31 @@ def test_mcp_migration_preview_apply_owner_and_project_boundary(tmp_path, signin
         assert 'data_typed' in {table['name'] for table in DataService(SkillRegistry(str(tmp_path/'finance.sqlite3'))).schema()['tables']}
         other=SkillRegistry(str(tmp_path/'other.sqlite3'));other.initialize()
         assert 'data_typed' not in {table['name'] for table in DataService(other).schema()['tables']}
+
+
+def test_mcp_merge_preview_apply_and_owner_boundary(tmp_path, signing):
+    from app.database import SkillRegistry
+    from app.transfers import SQLTransfers
+    from urllib.parse import urlsplit
+    settings=Settings('https://workspace.example',str(tmp_path),'https://issuer.example/','https://issuer.example/jwks','https://workspace.example/mcp',owner_subject='user')
+    source=SkillRegistry(str(settings.project_path('source')));source.initialize()
+    source.create_skill('merge.example','Import example','# Instructions')
+    transfers=SQLTransfers(settings,'source',source)
+    exported=transfers.export()
+    sql=bytes(transfers.store.lookup(token=urlsplit(exported['download_url']).fragment,kind='export')['payload']).decode()
+    headers={'Authorization':'Bearer '+signing(),'Accept':'application/json, text/event-stream'}
+    with TestClient(create_app(settings),base_url=settings.public_url) as client:
+        def call(arguments,project='finance',authorization=headers):
+            return client.post(f'/mcp?project={project}',headers=authorization,json={'jsonrpc':'2.0','id':1,'method':'tools/call','params':{'name':'import_sql','arguments':arguments}})
+        preview=call({'sql_content':sql,'mode':'merge'}).json()['result']['structuredContent']
+        assert preview['status']=='merge_preview' and preview['can_apply']
+        args={'import_id':preview['import_id'],'mode':'merge','apply':True,'preview_hash':preview['preview_hash']}
+        assert call(args,authorization={**headers,'Authorization':'Bearer '+signing(sub='other')}).status_code==401
+        assert call(args,project='other').json()['result']['isError']
+        result=call(args).json()['result']
+        assert not result.get('isError')
+        assert result['structuredContent']['status']=='merged'
+        assert result['structuredContent']['inserted_rows']==1
+        assert call(args).json()['result']['structuredContent']['replayed']
+        target=SkillRegistry(str(settings.project_path('finance')))
+        assert target.get_skill('merge.example')['content']=='# Instructions'

@@ -2,7 +2,7 @@ import asyncio
 import logging
 import re
 from urllib.parse import parse_qs, urlsplit
-from typing import Annotated
+from typing import Annotated, Literal
 from pydantic import Field
 
 from fastapi import FastAPI
@@ -110,9 +110,9 @@ def project_server(settings: Settings, project: str, registry: SkillRegistry, ve
         return SQLTransferResult.model_validate(transfers.export())
 
     @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False})
-    def import_sql(import_id: str | None = None, sql_content: str | None = None, apply: bool = False) -> SQLTransferResult:
-        """Restore a full project SQL snapshot. With no arguments, return a private browser upload link; render upload_url without dropping its fragment. Upload stages a file only. Call with import_id to validate/preview, or sql_content to stage small SQL text. After explicit user authorization call with import_id and apply=true to REPLACE the entire selected project including skills, data, audit history, and receipts. SQL is validated in isolation; invalid input never modifies the live project. Same import_id retries do not reapply a successful restore."""
-        return SQLTransferResult.model_validate(transfers.import_file(import_id, sql_content, apply))
+    def import_sql(import_id: str | None = None, sql_content: str | None = None, apply: bool = False, mode: Literal["restore", "merge"] = "restore", preview_hash: str | None = None) -> SQLTransferResult:
+        """Import a full SQL snapshot. No arguments prepares a private browser upload link; render it without dropping its fragment. Upload stages only. Call with import_id and mode to preview. mode=restore REPLACES the entire project after user authorization. mode=merge inserts missing data/skills and creates compatible missing tables/indexes, skips identical rows, and blocks different-value/UNIQUE conflicts; it never replaces existing records, audit history, or internal receipts. Merge apply requires mode=merge, apply=true, and the returned preview_hash after user authorization. Current restore mode and client safety checks are unchanged; do not use merge to retry a blocked full restore. sql_content can stage small SQL text. Reusing an applied import_id in the same mode returns its receipt."""
+        return SQLTransferResult.model_validate(transfers.import_file(import_id, sql_content, apply, mode, preview_hash))
 
     @mcp.resource("workspace://about")
     def about_resource() -> str:

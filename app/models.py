@@ -87,9 +87,33 @@ class ExecuteResult(BaseModel):
     replayed: bool = False
 
 
+class MergeTableResult(BaseModel):
+    table: str
+    inserted: int
+    identical: int
+    conflicts: int
+
+
+class MergeConflict(BaseModel):
+    table: str
+    key: dict[str, JsonValue]
+    reason: str
+
+
 class SQLTransferResult(BaseModel):
     status: str
     message: str
+    mode: str = "restore"
+    preview_hash: str | None = None
+    can_apply: bool | None = None
+    inserted_rows: int | None = None
+    identical_rows: int | None = None
+    conflict_count: int = 0
+    conflicts: list[MergeConflict] = Field(default_factory=list)
+    conflicts_truncated: bool = False
+    merge_tables: list[MergeTableResult] = Field(default_factory=list)
+    created_tables: list[str] = Field(default_factory=list)
+    created_indexes: list[str] = Field(default_factory=list)
     filename: str | None = None
     download_url: str | None = None
     upload_url: str | None = None
