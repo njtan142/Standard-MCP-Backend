@@ -14,6 +14,51 @@ SQLITE_SCHEMA = {'sqlite_master', 'sqlite_schema', 'sqlite_sequence'}
 SCHEMA_FUNCTIONS = {'like', 'glob', 'printf', 'sqlite_rename_table', 'sqlite_rename_column', 'sqlite_rename_test', 'sqlite_drop_column', 'sqlite_rename_quotefix'}
 
 
+ACTION_NAMES = {
+    sqlite3.SQLITE_READ: 'READ', sqlite3.SQLITE_INSERT: 'INSERT',
+    sqlite3.SQLITE_UPDATE: 'UPDATE', sqlite3.SQLITE_DELETE: 'DELETE',
+    sqlite3.SQLITE_FUNCTION: 'FUNCTION', sqlite3.SQLITE_PRAGMA: 'PRAGMA',
+    sqlite3.SQLITE_ATTACH: 'ATTACH', sqlite3.SQLITE_DETACH: 'DETACH',
+    sqlite3.SQLITE_CREATE_TABLE: 'CREATE_TABLE', sqlite3.SQLITE_DROP_TABLE: 'DROP_TABLE',
+    sqlite3.SQLITE_ALTER_TABLE: 'ALTER_TABLE', sqlite3.SQLITE_CREATE_INDEX: 'CREATE_INDEX',
+    sqlite3.SQLITE_DROP_INDEX: 'DROP_INDEX', sqlite3.SQLITE_CREATE_VIEW: 'CREATE_VIEW',
+    sqlite3.SQLITE_CREATE_TRIGGER: 'CREATE_TRIGGER', sqlite3.SQLITE_CREATE_VTABLE: 'CREATE_VTABLE',
+    sqlite3.SQLITE_TRANSACTION: 'TRANSACTION', sqlite3.SQLITE_SELECT: 'SELECT',
+}
+
+
+def safe_identifier(value):
+    if value in {'->', '->>'}:
+        return value
+    return value if isinstance(value, str) and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_.]{0,127}', value) else '[other]'
+
+
+def sqlite_failure_reason(error):
+    code = getattr(error, 'sqlite_errorname', type(error).__name__)
+    if code.startswith('SQLITE_CONSTRAINT'):
+        return 'A database constraint failed; check types, foreign keys, unique keys, NOT NULL, and CHECK rules'
+    if code in {'SQLITE_BUSY', 'SQLITE_LOCKED'}:
+        return 'Database is busy or locked'
+    if code == 'SQLITE_INTERRUPT':
+        return 'SQL execution budget exceeded'
+    if code == 'SQLITE_TOOBIG':
+        return 'SQL or value size limit exceeded'
+    text = str(error).lower()
+    if text.startswith('no such function:'):
+        return 'SQLite function is unavailable: ' + safe_identifier(str(error).split(':',1)[1].strip())
+    if text.startswith('no such table:'):
+        return 'Table does not exist: ' + safe_identifier(str(error).split(':',1)[1].strip())
+    if text.startswith('no such column:'):
+        return 'Column does not exist: ' + safe_identifier(str(error).split(':',1)[1].strip())
+    if 'already exists' in text:
+        return 'A schema object already exists; inspect db_schema before creating it'
+    if 'syntax error' in text or 'incomplete input' in text:
+        return 'Invalid or incomplete SQL syntax'
+    if code == 'SQLITE_AUTH' or 'not authorized' in text or 'prohibited' in text:
+        return 'Database authorization policy rejected this operation'
+    return 'SQLite could not execute this statement; check syntax, schema, parameters, and limits'
+
+
 def schema_objects(connection):
     return [dict(row) for row in connection.execute("SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY type,name")]
 
@@ -84,13 +129,18 @@ class Migrations:
             changed_rows = 0
             statement_changes = []
             touched_tables = set()
+            phase = "preflight"
+            statement_index = None
+            denied = {}
             try:
                 connection.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 262144)
                 connection.setlimit(sqlite3.SQLITE_LIMIT_SQL_LENGTH, 16384)
                 connection.setlimit(sqlite3.SQLITE_LIMIT_ATTACHED, 0)
                 connection.set_progress_handler(progress, 1000)
                 before_counts = {table: connection.execute(f'SELECT count(*) FROM "{table}"').fetchone()[0] for table in DataService.tables(connection)}
-                for statement in statements:
+                for statement_index, statement in enumerate(statements, 1):
+                    phase = "statement"
+                    denied = {}
                     # SQLite implements ALTER using internal schema scans and
                     # quick-check table functions. Enable only those helpers for
                     # a single ALTER statement; public SQL cannot issue PRAGMAs.
@@ -106,7 +156,14 @@ class Migrations:
                                 return sqlite3.SQLITE_OK
                             if action == sqlite3.SQLITE_PRAGMA and first == 'quick_check':
                                 return sqlite3.SQLITE_OK
-                        return self.authorize(action,first,second,database,source)
+                        decision = self.authorize(action,first,second,database,source)
+                        if decision != sqlite3.SQLITE_OK:
+                            denied.update(action=ACTION_NAMES.get(action, str(action)))
+                            if action == sqlite3.SQLITE_FUNCTION:
+                                denied['function'] = safe_identifier(second)
+                            elif first is not None:
+                                denied['target'] = safe_identifier(first)
+                        return decision
                     connection.set_authorizer(authorize)
                     previous_changes = connection.total_changes
                     cursor = connection.execute(statement['sql'], statement.get('params', []))
@@ -117,6 +174,8 @@ class Migrations:
                     changed_rows += delta
                     statement_changes.append(delta)
                     connection.set_authorizer(None)
+                phase = "validation"
+                statement_index = None
                 after = schema_objects(connection)
                 before_system = [row for row in before if not DATA_TABLE.fullmatch(row['tbl_name']) and row['tbl_name'] != 'sqlite_sequence']
                 after_system = [row for row in after if not DATA_TABLE.fullmatch(row['tbl_name']) and row['tbl_name'] != 'sqlite_sequence']
@@ -154,14 +213,24 @@ class Migrations:
                     connection.rollback()
                     return result
                 connection.set_progress_handler(None, 0)
+                phase = "recording"
                 batch_id = uuid.uuid4().hex
                 for index, statement in enumerate(statements):
                     connection.execute('INSERT INTO audit_mutations(batch_id,statement_index,actor,request_id,sql,params,changed_rows) VALUES (?,?,?,?,?,?,?)', (batch_id,index,audit_actor.get(),request_id.get(),statement['sql'],json.dumps(statement.get('params',[])), statement_changes[index]))
                 connection.execute('INSERT INTO system_migrations(migration_id,digest,response) VALUES (?,?,?)', (migration_id,digest,json.dumps(result)))
                 event('database.migration.applied', schema_changes=len(changes), changed_rows=changed_rows)
                 return result
-            except sqlite3.Error:
-                raise ValueError('Migration rejected: forbidden SQL, invalid schema, failed constraint, or execution limit; no changes saved') from None
+            except sqlite3.Error as error:
+                code = getattr(error, 'sqlite_errorname', type(error).__name__)
+                reason = sqlite_failure_reason(error)
+                policy = ("; denied " + json.dumps(denied, sort_keys=True)) if denied else ""
+                where = f"statement {statement_index}/{len(statements)}" if phase == "statement" else phase
+                event('database.migration.rejected', phase=phase, statement_index=statement_index, sqlite_error=code, reason=reason, policy=denied)
+                raise ValueError(f'Migration {where} failed [{code}]: {reason}{policy}. No changes saved.') from None
+            except ValueError as error:
+                where = f"statement {statement_index}/{len(statements)}" if phase == "statement" else phase
+                event('database.migration.rejected', phase=phase, statement_index=statement_index, error_type='ValidationError')
+                raise ValueError(f'Migration {where} failed: {error}. No changes saved.') from None
             finally:
                 connection.set_authorizer(None)
                 connection.set_progress_handler(None,0)

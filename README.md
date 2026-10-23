@@ -293,3 +293,9 @@ GROUP BY c.id, c.name, e.currency;
 For existing JSON records: inspect their actual fields, units, currencies, precision, and invalid/missing values first. Propose a separate, explicit INSERT ... SELECT backfill into relational tables. Preview and apply only after authorization. Verify row counts, totals per currency, constraints, and representative records; keep legacy rows until the user explicitly authorizes cleanup. Do not silently multiply money or invent missing fields. Update the project's skill after the agreed schema and conversion have been verified; backend upgrades never overwrite skill Markdown.
 
 Full SQL export/import includes the migration ledger and relational schema/indexes. Pre-ledger backups can be restored by adding an empty migration ledger during validation. Other incompatible system schemas still require an offline migration.
+
+### Diagnose rejected migrations
+
+Migration errors identify the 1-based statement number and total (for example `statement 4/9`), SQLite error code, and a sanitized reason. Authorization failures identify the denied operation and safe table/function identifier. Validation failures after execution identify the validation phase instead of blaming an arbitrary statement. The same metadata appears in `database.migration.rejected` logs with the request ID. SQL text, bound values, and raw SQLite exception messages are not dumped into diagnostics. Failed previews/applies still roll back the entire migration.
+
+JSON extraction operators `->` and `->>` are permitted in read, write, and migration SQL. `body -> '$.amount'` preserves the numeric token's textual representation (including exponent notation), which lets a SQL migration validate decimal syntax and precision before integer conversion. `->>` returns an extracted SQL scalar. JSON extraction alone does not make money conversion correct: explicitly reject unsupported currency, scale, notation, and range, and never rely on silent rounding.

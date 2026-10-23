@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from app.observability import audit_actor, request_id, trace_operation
 
 DATA_TABLE = re.compile(r"data_[a-z][a-z0-9_]*\Z")
-FUNCTIONS = set("count sum avg min max total coalesce ifnull nullif abs round length lower upper trim ltrim rtrim substr substring replace instr typeof quote hex date time datetime julianday strftime unixepoch json json_array json_object json_extract json_type json_valid json_array_length json_set json_insert json_replace json_remove json_patch last_insert_rowid changes printf format like glob unicode char group_concat string_agg json_group_array json_group_object json_quote json_error_position iif likely unlikely likelihood row_number rank dense_rank percent_rank cume_dist ntile lag lead first_value last_value nth_value".split())
+FUNCTIONS = set("count sum avg min max total coalesce ifnull nullif abs round length lower upper trim ltrim rtrim substr substring replace instr typeof quote hex date time datetime julianday strftime unixepoch json json_array json_object json_extract json_type json_valid json_array_length json_set json_insert json_replace json_remove json_patch last_insert_rowid changes printf format like glob unicode char group_concat string_agg json_group_array json_group_object json_quote json_error_position iif likely unlikely likelihood row_number rank dense_rank percent_rank cume_dist ntile lag lead first_value last_value nth_value -> ->>".split())
 MAX_RESULT_BYTES = 262144
 
 

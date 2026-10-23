@@ -161,3 +161,50 @@ def test_drop_table_preview_reports_existing_row_loss_without_applying(migration
     preview=migration.migrate('drop-preview',[{'sql':'DROP TABLE data_disposable','params':[]}])
     assert preview['row_impacts']==[{'table':'data_disposable','rows_before':1,'rows_after':None}]
     assert data.query('SELECT id FROM data_disposable')['rows']==[{'id':1}]
+
+
+def test_user_reported_schema_and_indexes_preview_supported(migration):
+    statements=[
+        {'sql':"CREATE TABLE data_accounts (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE, currency TEXT NOT NULL DEFAULT 'PHP' CHECK (currency = 'PHP'), UNIQUE (id, currency)) STRICT",'params':[]},
+        {'sql':'CREATE TABLE data_categories (id INTEGER PRIMARY KEY, name TEXT NOT NULL COLLATE NOCASE UNIQUE CHECK (length(trim(name)) > 0)) STRICT','params':[]},
+        {'sql':"CREATE TABLE data_expenses (id TEXT PRIMARY KEY NOT NULL, amount_centavos INTEGER NOT NULL CHECK (amount_centavos > 0), currency TEXT NOT NULL CHECK (currency = 'PHP'), expense_date TEXT NOT NULL, category_id INTEGER NOT NULL REFERENCES data_categories(id), account_id INTEGER, is_test INTEGER NOT NULL CHECK (is_test IN (0, 1)), source_collection TEXT NOT NULL, source_id TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY (account_id, currency) REFERENCES data_accounts(id, currency)) STRICT",'params':[]},
+        {'sql':'CREATE UNIQUE INDEX data_expenses_source_idx ON data_expenses(source_collection, source_id)','params':[]},
+        {'sql':'CREATE INDEX data_expenses_category_date_idx ON data_expenses(category_id, expense_date)','params':[]},
+        {'sql':'CREATE INDEX data_expenses_account_date_idx ON data_expenses(account_id, expense_date)','params':[]},
+        {'sql':'CREATE INDEX data_expenses_date_idx ON data_expenses(expense_date)','params':[]},
+    ]
+    preview=migration.migrate('reported-schema',statements)
+    assert preview['status']=='preview' and len(preview['changes'])==7
+    assert 'data_expenses' not in {table['name'] for table in DataService(migration.registry).schema()['tables']}
+
+
+@pytest.mark.parametrize('amount,raw',[('100','100'),('100.5','100.5'),('100.05','100.05'),('100.50','100.50'),('1e2','1e2'),('-5','-5')])
+def test_json_operators_preserve_numeric_tokens_in_reads_and_migrations(migration,amount,raw):
+    document='{"amount":'+amount+',"currency":"PHP"}'
+    data=DataService(migration.registry)
+    result=data.query("SELECT ? -> '$.amount' AS raw, ? ->> '$.currency' AS currency",[document,document])
+    assert result['rows']==[{'raw':raw,'currency':'PHP'}]
+    plan=[{'sql':'CREATE TABLE data_raw_token(value TEXT) STRICT','params':[]},{'sql':"INSERT INTO data_raw_token(value) VALUES (? -> '$.amount')",'params':[document]}]
+    preview=migration.migrate('raw-token',plan)
+    assert preview['changed_rows']==1
+    assert 'data_raw_token' not in {table['name'] for table in data.schema()['tables']}
+
+
+def test_diagnostic_identifies_statement_and_constraint_without_values(migration,caplog):
+    plan=[{'sql':'CREATE TABLE data_guard(amount INTEGER CHECK(amount>0), secret TEXT) STRICT','params':[]},{'sql':'INSERT INTO data_guard VALUES (?,?)','params':[-1,'PRIVATE_MIGRATION_VALUE']}]
+    with pytest.raises(ValueError) as failure:
+        migration.migrate('constraint-details',plan)
+    assert 'statement 2/2' in str(failure.value)
+    assert 'SQLITE_CONSTRAINT_CHECK' in str(failure.value)
+    assert 'PRIVATE_MIGRATION_VALUE' not in str(failure.value)
+    assert 'PRIVATE_MIGRATION_VALUE' not in caplog.text
+    assert 'data_guard' not in {table['name'] for table in DataService(migration.registry).schema()['tables']}
+
+
+def test_diagnostic_identifies_blocked_function_without_parameters(migration,caplog):
+    with pytest.raises(ValueError) as failure:
+        migration.migrate('blocked-function',[{'sql':'SELECT load_extension(?)','params':['PRIVATE_PATH_VALUE']}])
+    message=str(failure.value)
+    assert 'statement 1/1' in message
+    assert 'FUNCTION' in message and 'load_extension' in message
+    assert 'PRIVATE_PATH_VALUE' not in message and 'PRIVATE_PATH_VALUE' not in caplog.text
