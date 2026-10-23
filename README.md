@@ -1,6 +1,6 @@
 # Standard MCP Backend
 
-A Python, SQLite-backed foundation for project-specific, skill-driven MCP services. The server exposes `about`, `list_skills`, `get_skill`, `create_skill`, `update_skill`, and `delete_skill`, plus a `workspace://about` resource over standard Streamable HTTP. Skill changes are stored in the selected project’s SQLite database. Skill tools advertise explicit output schemas and return structured fields alongside text content, including the complete Markdown from get_skill.
+A Python, SQLite-backed foundation for project-specific, skill-driven MCP services. The server exposes `about`, `list_skills`, `get_skill`, `create_skill`, `update_skill`, and `delete_skill`, `db_schema`, `db_query`, and `db_execute`, plus a `workspace://about` resource over standard Streamable HTTP. Skill changes are stored in the selected project’s SQLite database. Skill tools advertise explicit output schemas and return structured fields alongside text content, including the complete Markdown from get_skill.
 
 ## Projects
 
@@ -20,7 +20,7 @@ The `/mcp` endpoint requires exactly one `project` query parameter; missing, bla
 
 ## Manage skills from ChatGPT
 
-After pulling updates, rebuild locally with `docker compose up --build -d backend`. Refresh the custom app's tools (reconnect if needed) and start a new chat with the app selected. Discovery should show six tools:
+After pulling updates, rebuild locally with `docker compose up --build -d backend`. Refresh the custom app's tools (reconnect if needed) and start a new chat with the app selected. Discovery should show nine tools (six skill tools and three database tools):
 
 | Tool | Arguments | Behavior |
 | --- | --- | --- |
@@ -35,7 +35,7 @@ Try: “Create a skill named finance.transactions that instructs you to ask for 
 
 Skill names are lowercase identifiers with dots, hyphens, or underscores, up to 128 characters. Description and Markdown content must be nonblank and are limited to 1,000 and 65,536 characters respectively. Duplicate creation fails without overwriting. Before editing or deleting, retrieve the latest version; stale changes fail and must be reviewed before retrying. Use `update_skill(enabled=false)` for reversible disabling; disabled content remains retrievable for administration but must not be followed as an active workflow. Names are immutable.
 
-Mutation tools are marked as writes for MCP clients; deletion and updates are marked destructive. Authorization remains owner-only for all tools. No sample skills are installed automatically. Skills store instructions; they do not execute Markdown or add finance tables. Database query/write tools are still pending, so creating a finance skill does not yet enable expense recording.
+Mutation tools are marked as writes for MCP clients; deletion and updates are marked destructive. Authorization remains owner-only for all tools. No sample skills are installed automatically. Skills store instructions; they do not execute Markdown or add finance tables. Use the database tools described below to store actual records according to your skill instructions.
 
 ## Local development
 
@@ -89,7 +89,7 @@ Automated tests exercise MCP initialization, discovery, calls, resources, OAuth 
 
 The cloud Docker builder has previously failed package-registry DNS resolution. A temporary equivalent image using hash-verified downloaded wheels validated the non-root container; the standard online Dockerfile must still run on a builder with working DNS. CI includes that build but has not been executed on GitHub here.
 
-Next: authorized generic data operations, audit history, then a complete agent-driven workflow. No application-specific tables or skills are seeded yet.
+Database inspection, bounded queries, atomic audited writes, and retry deduplication are implemented. No application-specific tables or skills are seeded; data_records provides generic JSON storage. A full finance workflow still needs your chosen record conventions and skill instructions.
 
 ## Dependency updates
 
@@ -173,3 +173,40 @@ Application lines include a timestamp, level, logger, generated request ID, and 
 Headers, bearer tokens, cookies, tool arguments, skill descriptions, Markdown contents, and raw responses are not logged by application tracing. User IDs remain off unless AUTH_DEBUG_USER_IDS=1 is explicitly enabled. Request-body inspection is capped at 64 KiB and response inspection at 4 KiB; larger messages still pass through intact, with byte totals and timing but reduced metadata. Unknown MCP method/tool strings are logged as `unknown`. Database context follows the request into worker threads. These logs help diagnose operations but are not a durable audit history.
 
 Backend container logs rotate at 10 MiB with three files retained. Your Docker daemon must support the json-file driver used by Compose. For failures, share matching request-ID lines rather than credentials or raw traffic dumps.
+
+
+## Store and retrieve project data
+
+Three database tools use the same project selection and verified owner check as skill tools:
+
+| Tool | Input | Output |
+| --- | --- | --- |
+| `db_schema` | None | Permitted tables, columns, and writability |
+| `db_query` | `sql`, optional `params`, `max_rows` (default 100, max 500) | Structured columns, rows, count, and `truncated` |
+| `db_execute` | `statements` (1–50 SQL/params objects), `idempotency_key` | Batch ID, per-statement change counts, optional insert row ID, audit IDs, replay status |
+
+Each project's existing SQLite file is upgraded additively on access, preserving skills and records. The generic `data_records` table uses `(collection, id)` as its primary key and stores a JSON string in `body`. Skills define the JSON fields and workflows; the Python backend contains no finance-specific logic. Choose stable record IDs and store money as integer minor units plus a currency in your skill's conventions. Caller-written updates must explicitly update `updated_at` when desired.
+
+For example, `db_execute` arguments to save a record:
+
+```json
+{
+  "statements": [{
+    "sql": "INSERT INTO data_records(collection, id, body) VALUES (?, ?, ?)",
+    "params": ["expenses", "expense-example-001", "{\"amount_minor\":120000,\"currency\":\"PHP\",\"category\":\"shopping\"}"]
+  }],
+  "idempotency_key": "expense-example-001-create"
+}
+```
+
+The JSON body above is a string bound as a SQL value, not a nested object parameter. Read it back with `SELECT id, body FROM data_records WHERE collection = ? AND id = ?` and params `["expenses", "expense-example-001"]`. SQLite JSON extraction functions are supported. Ask for missing fields before writing; examples are not real transactions.
+
+Every write batch runs inside one transaction with its audit entries and idempotency receipt. If any statement fails, all earlier writes and audit entries in that batch roll back. Retrying the same batch with the same key returns its original result with `replayed=true`. Reusing that key for different SQL/params fails. Use a new key for each intended new batch; receipt history persists with the project database.
+
+Query `audit_mutations` to inspect committed data writes: SQL text, JSON-bound parameters, changed-row count, batch/statement IDs, verified actor, request ID, and UTC timestamp. This is sensitive project data stored in SQLite, not console logging. Audit entries do not contain before/after row snapshots and do not cover skill-administration operations. Failed batches leave no mutation-audit entries; failure diagnostics remain in application logs.
+
+SQLite's authorizer enforces a default-deny policy. Queries can read physical `data_*` tables and `audit_mutations`. Writes can modify only physical `data_*` tables. Internal system/skill tables, audit changes, schema changes, PRAGMAs, ATTACH/DETACH, transaction commands, views/triggers, and unapproved functions are denied. Schema changes remain an offline administrator operation; the MCP interface does not expose migration SQL. Data tables added by a trusted administrator must have lowercase `data_` names. Do not edit the database or its schema concurrently with the server.
+
+Each SQL string is limited to one statement and 16 KiB. Bound scalar parameters are limited to 64 KiB per statement; batches to 256 KiB. SQL work is bounded by a progress limit of approximately one million VM steps or two seconds, plus SQLite's lock timeout. Reads cap the row payload at approximately 256 KiB and report truncation; page with deterministic ORDER BY and filters. BLOB results are encoded as base64 objects. Read/RETURNING statements are not accepted by db_execute. SQL limits may reject expensive queries even if valid.
+
+After updating and refreshing the ChatGPT tools, try: “Inspect the schema, then tell me what information the finance.transactions skill requires before saving an expense. Do not invent a transaction.” When you supply an actual record and authorize saving it, ChatGPT can perform the parameterized write, retrieve it, and inspect its audit entry.

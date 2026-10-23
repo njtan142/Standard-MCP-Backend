@@ -39,7 +39,7 @@ def test_auth_and_mcp(tmp_path, signing):
         initialized = call("initialize", {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "test", "version": "1"}})
         assert initialized.status_code == 200, initialized.text
         tools = call("tools/list").json()["result"]["tools"]
-        assert {t["name"] for t in tools} == {"about", "list_skills", "get_skill", "create_skill", "update_skill", "delete_skill"}
+        assert {t["name"] for t in tools} == {"about", "list_skills", "get_skill", "create_skill", "update_skill", "delete_skill", "db_schema", "db_query", "db_execute"}
         result = call("tools/call", {"name": "about", "arguments": {}}).json()["result"]
         assert "No enabled skills" in result["content"][0]["text"]
         assert not result.get("isError")
@@ -185,7 +185,7 @@ def test_query_project_connections(tmp_path, signing):
             assert client.post(url, headers=headers, json=body).status_code == 200
             assert (tmp_path / f"{project}.sqlite3").is_file()
             listed = client.post(url, headers=headers, json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"}).json()
-            assert {tool["name"] for tool in listed["result"]["tools"]} == {"about", "list_skills", "get_skill", "create_skill", "update_skill", "delete_skill"}
+            assert {tool["name"] for tool in listed["result"]["tools"]} == {"about", "list_skills", "get_skill", "create_skill", "update_skill", "delete_skill", "db_schema", "db_query", "db_execute"}
             result = client.post(url, headers=headers, json={"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "about", "arguments": {}}}).json()["result"]
             assert f"Project: {project}" in result["content"][0]["text"]
         from app.database import SkillRegistry
@@ -321,3 +321,32 @@ def test_mcp_skill_lifecycle_and_isolation(tmp_path, signing):
             assert schema["properties"]["content"]["type"] == "string"
             assert "content" in schema["required"]
         assert by_name["delete_skill"]["outputSchema"]["properties"]["deleted"]["type"] == "boolean"
+
+
+def test_mcp_data_tools_owner_isolation_and_structured_audit(tmp_path, signing):
+    settings = Settings("https://workspace.example", str(tmp_path), "https://issuer.example/", "https://issuer.example/jwks", "https://workspace.example/mcp", owner_subject="user")
+    headers = {"Authorization": "Bearer " + signing(), "Accept": "application/json, text/event-stream"}
+    with TestClient(create_app(settings), base_url=settings.public_url) as client:
+        def call(tool, arguments, project="finance"):
+            response = client.post(f"/mcp?project={project}", headers=headers, json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": tool, "arguments": arguments}})
+            assert response.status_code == 200
+            return response.json()["result"], response.headers["x-request-id"]
+        schema, _ = call("db_schema", {})
+        assert {table["name"] for table in schema["structuredContent"]["tables"]} == {"data_records", "audit_mutations"}
+        args = {"statements": [{"sql": "INSERT INTO data_records(collection, id, body) VALUES (?, ?, ?)", "params": ["expenses", "expense-one", '{"amount_minor":120000,"currency":"PHP"}']}], "idempotency_key": "expense-one"}
+        written, trace = call("db_execute", args)
+        assert not written.get("isError")
+        assert written["structuredContent"]["results"][0]["changed_rows"] == 1
+        replay, _ = call("db_execute", args)
+        assert replay["structuredContent"]["replayed"] is True
+        saved, _ = call("db_query", {"sql": "SELECT id, body FROM data_records WHERE collection = ?", "params": ["expenses"]})
+        assert saved["structuredContent"]["rows"][0]["id"] == "expense-one"
+        other, _ = call("db_query", {"sql": "SELECT * FROM data_records"}, "other")
+        assert other["structuredContent"]["rows"] == []
+        audit, _ = call("db_query", {"sql": "SELECT actor, request_id, changed_rows FROM audit_mutations"})
+        assert audit["structuredContent"]["rows"] == [{"actor": "user", "request_id": trace, "changed_rows": 1}]
+        blocked, _ = call("db_query", {"sql": "SELECT * FROM system_skills"})
+        assert blocked["isError"]
+        denied = client.post("/mcp?project=denied", headers={**headers, "Authorization": "Bearer " + signing(sub="other-user")}, json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "db_execute", "arguments": args}})
+        assert denied.status_code == 401
+        assert not (tmp_path / "denied.sqlite3").exists()

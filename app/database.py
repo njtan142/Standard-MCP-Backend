@@ -13,7 +13,7 @@ class SkillRegistry:
     @contextmanager
     def connect(self):
         event("database.connection.open", logging.DEBUG)
-        connection = sqlite3.connect(self.path)
+        connection = sqlite3.connect(self.path, cached_statements=0)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         try:
@@ -39,6 +39,30 @@ class SkillRegistry:
                 version INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )""")
+            connection.execute("""CREATE TABLE IF NOT EXISTS data_records (
+                collection TEXT NOT NULL,
+                id TEXT NOT NULL,
+                body TEXT NOT NULL CHECK(json_valid(body)),
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY(collection, id)
+            )""")
+            connection.execute("""CREATE TABLE IF NOT EXISTS audit_mutations (
+                id INTEGER PRIMARY KEY,
+                batch_id TEXT NOT NULL,
+                statement_index INTEGER NOT NULL,
+                actor TEXT NOT NULL,
+                request_id TEXT NOT NULL,
+                sql TEXT NOT NULL,
+                params TEXT NOT NULL,
+                changed_rows INTEGER NOT NULL,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )""")
+            connection.execute("""CREATE TABLE IF NOT EXISTS system_write_requests (
+                idempotency_key TEXT PRIMARY KEY,
+                digest TEXT NOT NULL,
+                response TEXT NOT NULL
             )""")
 
     @staticmethod
@@ -148,5 +172,11 @@ class SkillRegistry:
             "not as active workflows. Use list_skills(include_disabled=true) to find disabled skills. "
             "Before updating or deleting, get_skill and supply its version as expected_version. "
             "Deletion is permanent; disabling uses update_skill(enabled=false). "
-            "Application data and database tools are not implemented yet.\n"
+            "Database tools: db_schema, db_query, db_execute. Inspect db_schema first. "
+            "data_records stores arbitrary records as JSON text, keyed by collection and id; "
+            "skills define record structure and workflows. Bind values in params. "
+            "db_execute commits a batch atomically with audit entries; use a unique idempotency_key "
+            "per intended batch and reuse it only when retrying the identical batch. "
+            "Read audit_mutations with db_query; generic SQL cannot change skills, audit, or schema. "
+            "Verify writes with db_query, and report when results are truncated.\n"
         )

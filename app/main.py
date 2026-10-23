@@ -15,7 +15,8 @@ from mcp.server.transport_security import TransportSecuritySettings
 from app.auth import JWTVerifier, OwnerVerifier
 from app.config import Settings
 from app.database import SkillRegistry
-from app.models import DeletedSkill, Skill, SkillSummary
+from app.models import DeletedSkill, Skill, SkillSummary, SQLStatement, DatabaseSchema, QueryResult, ExecuteResult
+from app.data import DataService
 from app.observability import RequestLoggingMiddleware, configure_logging, event, project_name
 
 
@@ -73,6 +74,23 @@ def project_server(settings: Settings, project: str, registry: SkillRegistry, ve
     def delete_skill(name: str, expected_version: Annotated[int, Field(strict=True, ge=1)]) -> DeletedSkill:
         """Permanently delete a skill after user authorization. First get_skill and supply its current version; use update_skill(enabled=false) for reversible disabling."""
         return DeletedSkill.model_validate(registry.delete_skill(name, expected_version))
+
+    data = DataService(registry)
+
+    @mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False})
+    def db_schema() -> DatabaseSchema:
+        """Inspect this project's permitted data tables and read-only audit table. Internal system tables are hidden."""
+        return DatabaseSchema.model_validate(data.schema())
+
+    @mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False})
+    def db_query(sql: str, params: list | dict | None = None, max_rows: Annotated[int, Field(strict=True, ge=1, le=500)] = 100) -> QueryResult:
+        """Execute one bounded read-only SELECT on data_* or audit_mutations. Bind values in params. Check truncated; use deterministic ORDER BY and pagination for more rows."""
+        return QueryResult.model_validate(data.query(sql, params, max_rows))
+
+    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True})
+    def db_execute(statements: Annotated[list[SQLStatement], Field(min_length=1, max_length=50)], idempotency_key: str) -> ExecuteResult:
+        """Atomically execute 1–50 parameterized INSERT/UPDATE/DELETE statements on data_* tables, with audit history. No RETURNING, DDL, or transaction SQL. Use a fresh idempotency_key per intended batch; reuse it only for identical retries. Confirm destructive changes with the user."""
+        return ExecuteResult.model_validate(data.execute([statement.model_dump() for statement in statements], idempotency_key))
 
     @mcp.resource("workspace://about")
     def about_resource() -> str:

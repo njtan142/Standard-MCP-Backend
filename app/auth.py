@@ -2,7 +2,7 @@ import asyncio
 import logging
 import jwt
 from mcp.server.auth.provider import AccessToken
-from app.observability import event
+from app.observability import event, audit_actor
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +73,7 @@ class OwnerVerifier:
             if self.debug_user_ids:
                 logger.warning("OAuth owner diagnostic: signed_in_user_id=%r configured_owner_id=%r", access.subject, self.owner_subject)
             return None
+        audit_actor.set(access.subject)
         event("oauth.owner.authorized", logging.DEBUG, matching_mode="full_subject" if "|" in self.owner_subject else "bare_user_id")
         await asyncio.to_thread(self.registry.initialize)
         return access

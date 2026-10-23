@@ -9,6 +9,7 @@ from functools import wraps
 
 request_id = ContextVar("request_id", default="-")
 project_name = ContextVar("project", default="-")
+audit_actor = ContextVar("audit_actor", default="local-development")
 logger = logging.getLogger(__name__)
 
 
@@ -50,11 +51,16 @@ def trace_operation(function):
         if isinstance(result, list):
             fields["row_count"] = len(result)
         elif isinstance(result, dict):
-            for key in ("version", "enabled", "deleted"):
+            for key in ("version", "enabled", "deleted", "row_count", "truncated", "replayed"):
                 if key in result:
                     fields[key] = result[key]
             if "content" in result:
                 fields["content_characters"] = len(result["content"])
+            if "tables" in result:
+                fields["table_count"] = len(result["tables"])
+            if "results" in result:
+                fields["statement_count"] = len(result["results"])
+                fields["changed_rows"] = sum(item["changed_rows"] for item in result["results"])
         event("database.operation.complete", operation=function.__name__, duration_ms=round((time.perf_counter()-started)*1000, 2), **fields)
         return result
     return traced
@@ -71,6 +77,7 @@ class RequestLoggingMiddleware:
         identifier = uuid.uuid4().hex
         request_token = request_id.set(identifier)
         project_token = project_name.set("-")
+        actor_token = audit_actor.set("local-development")
         started = time.perf_counter()
         status = 500
         request_bytes = 0
@@ -102,7 +109,7 @@ class RequestLoggingMiddleware:
             params = body.get("params")
             name = params.get("name") if isinstance(params, dict) else None
             if method == "tools/call":
-                tool = name if isinstance(name, str) and name in {"about", "list_skills", "get_skill", "create_skill", "update_skill", "delete_skill"} else "unknown"
+                tool = name if isinstance(name, str) and name in {"about", "list_skills", "get_skill", "create_skill", "update_skill", "delete_skill", "db_schema", "db_query", "db_execute"} else "unknown"
             event("mcp.request.received", rpc_method=method, tool=tool)
 
         async def observed_receive():
@@ -150,3 +157,4 @@ class RequestLoggingMiddleware:
             event("http.request.complete", http_method=scope.get("method"), path=safe_path, status=status, rpc_method=method, tool=tool, request_bytes=request_bytes, response_bytes=response_bytes, duration_ms=round((time.perf_counter()-started)*1000, 2), **summary)
             request_id.reset(request_token)
             project_name.reset(project_token)
+            audit_actor.reset(actor_token)
