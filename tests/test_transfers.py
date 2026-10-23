@@ -152,3 +152,31 @@ def test_default_project_record_and_foreign_key_roundtrip(transfer):
     with transfer.registry.connect() as connection:
         assert connection.execute('SELECT seq FROM sqlite_sequence WHERE name=?', ('data_parent',)).fetchone()[0] == 101
         assert connection.execute('PRAGMA foreign_key_check').fetchone() is None
+
+
+def test_relational_schema_indexes_and_migration_receipts_roundtrip(transfer):
+    from app.migrations import Migrations
+    migration = Migrations(transfer.registry)
+    statements = [{'sql':'CREATE TABLE data_categories(id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE) STRICT','params':[]},{'sql':'CREATE TABLE data_expenses(id TEXT PRIMARY KEY, category TEXT REFERENCES data_categories(id), amount_minor INTEGER CHECK(amount_minor>0)) STRICT','params':[]},{'sql':'CREATE INDEX data_expenses_category ON data_expenses(category)','params':[]}]
+    preview=migration.migrate('relational',statements)
+    migration.migrate('relational',statements,True,preview['preview_hash'])
+    sql=download(transfer)
+    upload=transfer.import_file(sql_content=sql)
+    transfer.import_file(import_id=upload['import_id'],apply=True)
+    schema={table['name']:table for table in DataService(transfer.registry).schema()['tables']}
+    assert schema['data_expenses']['strict']
+    assert schema['data_expenses']['foreign_keys'][0]['table']=='data_categories'
+    assert any(index['name']=='data_expenses_category' for index in schema['data_expenses']['indexes'])
+    assert migration.migrate('relational',statements,True,preview['preview_hash'])['replayed']
+
+
+def test_pre_migration_ledger_sql_snapshot_remains_restorable(transfer):
+    from app.transfers import split_sql
+    statements=split_sql(download(transfer))
+    older='\n'.join(statement for statement in statements if not __import__('re').search(r'CREATE TABLE system_migrations\b',statement))
+    preview=transfer.import_file(sql_content=older)
+    result=transfer.import_file(import_id=preview['import_id'],apply=True)
+    assert result['status']=='restored'
+    assert transfer.registry.get_skill('finance.transactions')['version']==1
+    with transfer.registry.connect() as connection:
+        assert connection.execute('SELECT count(*) FROM system_migrations').fetchone()[0]==0

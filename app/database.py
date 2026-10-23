@@ -65,6 +65,11 @@ class SkillRegistry:
                 changed_rows INTEGER NOT NULL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
             )""")
+            connection.execute("""CREATE TABLE IF NOT EXISTS system_migrations (
+                migration_id TEXT PRIMARY KEY,
+                digest TEXT NOT NULL,
+                response TEXT NOT NULL
+            )""")
             connection.execute("""CREATE TABLE IF NOT EXISTS system_sql_imports (
                 import_id TEXT PRIMARY KEY,
                 response TEXT NOT NULL
@@ -183,7 +188,11 @@ class SkillRegistry:
             "Before updating or deleting, get_skill and supply its version as expected_version. "
             "Deletion is permanent; disabling uses update_skill(enabled=false). "
             "Database tools: db_schema, db_query, db_execute. Inspect db_schema first. "
-            "data_records stores arbitrary records as JSON text, keyed by collection and id; "
+            "Prefer relational data_* tables with STRICT types, foreign keys, CHECK/UNIQUE constraints, "
+            "and indexes. Use SQL joins and aggregation rather than calculating over records in the agent. "
+            "db_migrate previews schema and data backfills, then applies identical statements with a preview_hash "
+            "after user authorization. Keep data_records as optional document/legacy storage; never "
+            "delete or convert existing JSON records without an explicit, verified migration. "
             "skills define record structure and workflows. Bind values in params. "
             "db_execute commits a batch atomically with audit entries; use a unique idempotency_key "
             "per intended batch and reuse it only when retrying the identical batch. "

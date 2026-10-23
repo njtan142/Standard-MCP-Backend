@@ -109,7 +109,7 @@ class RequestLoggingMiddleware:
             params = body.get("params")
             name = params.get("name") if isinstance(params, dict) else None
             if method == "tools/call":
-                tool = name if isinstance(name, str) and name in {"about", "list_skills", "get_skill", "create_skill", "update_skill", "delete_skill", "db_schema", "db_query", "db_execute", "export_sql", "import_sql"} else "unknown"
+                tool = name if isinstance(name, str) and name in {"about", "list_skills", "get_skill", "create_skill", "update_skill", "delete_skill", "db_schema", "db_query", "db_execute", "export_sql", "import_sql", "db_migrate"} else "unknown"
             event("mcp.request.received", rpc_method=method, tool=tool)
 
         async def observed_receive():

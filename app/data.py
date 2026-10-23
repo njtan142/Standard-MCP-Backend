@@ -12,7 +12,7 @@ from contextlib import contextmanager
 from app.observability import audit_actor, request_id, trace_operation
 
 DATA_TABLE = re.compile(r"data_[a-z][a-z0-9_]*\Z")
-FUNCTIONS = set("count sum avg min max total coalesce ifnull nullif abs round length lower upper trim ltrim rtrim substr substring replace instr typeof quote hex date time datetime julianday strftime unixepoch json json_array json_object json_extract json_type json_valid json_array_length json_set json_insert json_replace json_remove json_patch last_insert_rowid changes".split())
+FUNCTIONS = set("count sum avg min max total coalesce ifnull nullif abs round length lower upper trim ltrim rtrim substr substring replace instr typeof quote hex date time datetime julianday strftime unixepoch json json_array json_object json_extract json_type json_valid json_array_length json_set json_insert json_replace json_remove json_patch last_insert_rowid changes printf format like glob unicode char group_concat string_agg json_group_array json_group_object json_quote json_error_position iif likely unlikely likelihood row_number rank dense_rank percent_rank cume_dist ntile lag lead first_value last_value nth_value".split())
 MAX_RESULT_BYTES = 262144
 
 
@@ -87,9 +87,16 @@ class DataService:
         with self.connection() as connection:
             tables = []
             for name in sorted(self.tables(connection) | {"audit_mutations"}):
-                columns = [{"name": row["name"], "type": row["type"], "nullable": not bool(row["notnull"] or row["pk"]), "primary_key": bool(row["pk"])} for row in connection.execute("SELECT * FROM pragma_table_info(?)", (name,))]
-                tables.append({"name": name, "writable": name != "audit_mutations", "columns": columns})
-        return {"tables": tables, "guidance": "Use data_records(collection, id, body) for arbitrary project records; body is JSON text. Timestamps are UTC. Bind values through params. Only data_* tables are writable; audit_mutations is read-only. System tables, views, triggers, PRAGMAs, DDL, ATTACH, and transaction SQL are denied. Schema migrations are an offline administrator operation."}
+                columns = [{"name": row["name"], "type": row["type"], "nullable": not bool(row["notnull"] or row["pk"]), "primary_key": bool(row["pk"]), "default_value": row["dflt_value"], "generated": row["hidden"] in {2,3}} for row in connection.execute("SELECT * FROM pragma_table_xinfo(?)", (name,))]
+                foreign_keys = [{"id": row["id"], "sequence": row["seq"], "table": row["table"], "from_column": row["from"], "to_column": row["to"], "on_update": row["on_update"], "on_delete": row["on_delete"]} for row in connection.execute("SELECT * FROM pragma_foreign_key_list(?)", (name,))]
+                indexes = []
+                for row in connection.execute("SELECT * FROM pragma_index_list(?)", (name,)):
+                    definition = connection.execute("SELECT sql FROM sqlite_schema WHERE type='index' AND name=?", (row["name"],)).fetchone()
+                    indexes.append({"name": row["name"], "unique": bool(row["unique"]), "columns": [column["name"] for column in connection.execute("SELECT * FROM pragma_index_info(?)", (row["name"],))], "partial": bool(row["partial"]), "sql": definition[0] if definition else None})
+                definition = connection.execute("SELECT sql FROM sqlite_schema WHERE type='table' AND name=?", (name,)).fetchone()[0]
+                strict = bool(connection.execute("SELECT strict FROM pragma_table_list WHERE schema='main' AND name=?", (name,)).fetchone()[0])
+                tables.append({"name": name, "writable": name != "audit_mutations", "columns": columns, "foreign_keys": foreign_keys, "indexes": indexes, "sql": definition, "strict": strict})
+        return {"tables": tables, "guidance": "Prefer relational data_* tables with STRICT types, CHECK/UNIQUE constraints, foreign keys, and indexes. Let SQLite enforce integrity and perform joins/aggregation. Use db_migrate to preview schema changes/backfills, then apply with its preview_hash after user authorization. data_records is optional legacy/document storage; preserve existing JSON records until an explicit migration has been verified. Bind values through params. audit_mutations is read-only. Generic SQL cannot change system tables, audit, or schema. Views, triggers, PRAGMAs, ATTACH, and transaction SQL remain denied."}
 
     @trace_operation
     def query(self, sql, params=None, max_rows=100):

@@ -30,12 +30,36 @@ class ColumnSchema(BaseModel):
     type: str
     nullable: bool
     primary_key: bool
+    default_value: str | None = None
+    generated: bool = False
+
+
+class ForeignKeySchema(BaseModel):
+    id: int
+    sequence: int
+    table: str
+    from_column: str
+    to_column: str | None
+    on_update: str
+    on_delete: str
+
+
+class IndexSchema(BaseModel):
+    name: str
+    unique: bool
+    columns: list[str | None]
+    partial: bool
+    sql: str | None
 
 
 class TableSchema(BaseModel):
     name: str
     writable: bool
     columns: list[ColumnSchema]
+    foreign_keys: list[ForeignKeySchema] = Field(default_factory=list)
+    indexes: list[IndexSchema] = Field(default_factory=list)
+    sql: str | None = None
+    strict: bool = False
 
 
 class DatabaseSchema(BaseModel):
@@ -76,3 +100,30 @@ class SQLTransferResult(BaseModel):
     row_count: int | None = None
     tables: list[str] | None = None
     replayed: bool = False
+
+
+class SchemaChange(BaseModel):
+    operation: str
+    object_type: str
+    name: str
+    before_sql: str | None
+    after_sql: str | None
+
+
+class TableImpact(BaseModel):
+    table: str
+    rows_before: int | None
+    rows_after: int | None
+
+
+class MigrationResult(BaseModel):
+    status: str
+    migration_id: str
+    preview_hash: str
+    schema_hash_before: str
+    schema_hash_after: str
+    changes: list[SchemaChange]
+    row_impacts: list[TableImpact] = Field(default_factory=list)
+    changed_rows: int
+    replayed: bool
+    message: str

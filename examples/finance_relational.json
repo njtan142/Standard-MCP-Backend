@@ -1,0 +1,22 @@
+{
+  "migration_id": "finance-relational-v1",
+  "apply": false,
+  "statements": [
+    {
+      "sql": "CREATE TABLE data_categories (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE) STRICT",
+      "params": []
+    },
+    {
+      "sql": "CREATE TABLE data_expenses (id TEXT PRIMARY KEY, amount_minor INTEGER NOT NULL CHECK (amount_minor > 0), currency TEXT NOT NULL CHECK (length(currency) = 3 AND currency = upper(currency)), expense_date TEXT NOT NULL CHECK (expense_date IS date(expense_date, '+0 days')), category_id TEXT REFERENCES data_categories(id), notes TEXT, is_test INTEGER NOT NULL DEFAULT 0 CHECK (is_test IN (0, 1)), created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP) STRICT",
+      "params": []
+    },
+    {
+      "sql": "CREATE INDEX data_expenses_currency_date ON data_expenses(currency, expense_date)",
+      "params": []
+    },
+    {
+      "sql": "CREATE INDEX data_expenses_category ON data_expenses(category_id)",
+      "params": []
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 # Standard MCP Backend
 
-A Python, SQLite-backed foundation for project-specific, skill-driven MCP services. The server exposes `about`, `list_skills`, `get_skill`, `create_skill`, `update_skill`, and `delete_skill`, `db_schema`, `db_query`, and `db_execute`, plus a `workspace://about` resource over standard Streamable HTTP. Skill changes are stored in the selected project’s SQLite database. Skill tools advertise explicit output schemas and return structured fields alongside text content, including the complete Markdown from get_skill.
+A Python, SQLite-backed foundation for project-specific, skill-driven MCP services. The server exposes `about`, `list_skills`, `get_skill`, `create_skill`, `update_skill`, and `delete_skill`, `db_schema`, `db_query`, `db_execute`, and `db_migrate`, plus a `workspace://about` resource over standard Streamable HTTP. Skill changes are stored in the selected project’s SQLite database. Skill tools advertise explicit output schemas and return structured fields alongside text content, including the complete Markdown from get_skill.
 
 ## Projects
 
@@ -20,7 +20,7 @@ The `/mcp` endpoint requires exactly one `project` query parameter; missing, bla
 
 ## Manage skills from ChatGPT
 
-After pulling updates, rebuild locally with `docker compose up --build -d backend`. Refresh the custom app's tools (reconnect if needed) and start a new chat with the app selected. Discovery should show eleven tools (six skill tools, three database tools, and SQL export/import):
+After pulling updates, rebuild locally with `docker compose up --build -d backend`. Refresh the custom app's tools (reconnect if needed) and start a new chat with the app selected. Discovery should show twelve tools (six skill tools, four database tools, and SQL export/import):
 
 | Tool | Arguments | Behavior |
 | --- | --- | --- |
@@ -89,7 +89,7 @@ Automated tests exercise MCP initialization, discovery, calls, resources, OAuth 
 
 The cloud Docker builder has previously failed package-registry DNS resolution. A temporary equivalent image using hash-verified downloaded wheels validated the non-root container; the standard online Dockerfile must still run on a builder with working DNS. CI includes that build but has not been executed on GitHub here.
 
-Database inspection, bounded queries, atomic audited writes, and retry deduplication are implemented. No application-specific tables or skills are seeded; data_records provides generic JSON storage. A full finance workflow still needs your chosen record conventions and skill instructions.
+Database inspection, bounded queries, atomic audited writes, and retry deduplication are implemented. No application-specific tables or skills are seeded. Prefer relational schemas created through reviewed db_migrate plans; data_records remains optional legacy/document storage. A full finance workflow still needs your chosen record conventions and skill instructions.
 
 ## Dependency updates
 
@@ -177,17 +177,18 @@ Backend container logs rotate at 10 MiB with three files retained. Your Docker d
 
 ## Store and retrieve project data
 
-Three database tools use the same project selection and verified owner check as skill tools:
+Four database tools use the same project selection and verified owner check as skill tools:
 
 | Tool | Input | Output |
 | --- | --- | --- |
 | `db_schema` | None | Permitted tables, columns, and writability |
 | `db_query` | `sql`, optional `params`, `max_rows` (default 100, max 500) | Structured columns, rows, count, and `truncated` |
 | `db_execute` | `statements` (1–50 SQL/params objects), `idempotency_key` | Batch ID, per-statement change counts, optional insert row ID, audit IDs, replay status |
+| `db_migrate` | `migration_id`, `statements`, optional `apply`, `preview_hash` | Schema changes, affected-row counts, preview hash, retry status |
 
-Each project's existing SQLite file is upgraded additively on access, preserving skills and records. The generic `data_records` table uses `(collection, id)` as its primary key and stores a JSON string in `body`. Skills define the JSON fields and workflows; the Python backend contains no finance-specific logic. Choose stable record IDs and store money as integer minor units plus a currency in your skill's conventions. Caller-written updates must explicitly update `updated_at` when desired.
+Each project's existing SQLite file is upgraded additively on access, preserving skills and records. The default approach is a relational data_* schema: use typed columns, foreign keys, CHECK/UNIQUE constraints, and indexes, with SQLite joins and aggregation. Skills define domain workflows and SQL conventions; the Python backend contains no finance-specific logic. The compatibility data_records table remains available for document-shaped or legacy records, using `(collection, id)` as its primary key and JSON text in body. Choose stable record IDs and store money as integer minor units plus a currency in your skill's conventions. Caller-written updates must explicitly update `updated_at` when desired.
 
-For example, `db_execute` arguments to save a record:
+For compatibility/document storage only, `db_execute` arguments to save a JSON record:
 
 ```json
 {
@@ -205,7 +206,7 @@ Every write batch runs inside one transaction with its audit entries and idempot
 
 Query `audit_mutations` to inspect committed data writes: SQL text, JSON-bound parameters, changed-row count, batch/statement IDs, verified actor, request ID, and UTC timestamp. This is sensitive project data stored in SQLite, not console logging. Audit entries do not contain before/after row snapshots and do not cover skill-administration operations. Failed batches leave no mutation-audit entries; failure diagnostics remain in application logs.
 
-SQLite's authorizer enforces a default-deny policy. Queries can read physical `data_*` tables and `audit_mutations`. Writes can modify only physical `data_*` tables. Internal system/skill tables, audit changes, schema changes, PRAGMAs, ATTACH/DETACH, transaction commands, views/triggers, and unapproved functions are denied. Schema changes remain an offline administrator operation; the MCP interface does not expose migration SQL. Data tables added by a trusted administrator must have lowercase `data_` names. Do not edit the database or its schema concurrently with the server.
+SQLite's authorizer enforces a default-deny policy. Queries can read physical `data_*` tables and `audit_mutations`. Writes can modify only physical `data_*` tables. Internal system/skill tables, audit changes, schema changes, PRAGMAs, ATTACH/DETACH, transaction commands, views/triggers, and unapproved functions are denied. Schema changes use the dedicated owner-only db_migrate preview/apply flow below. Tables and named indexes must use lowercase `data_` names. Do not edit the database or its schema concurrently with the server.
 
 Each SQL string is limited to one statement and 16 KiB. Bound scalar parameters are limited to 64 KiB per statement; batches to 256 KiB. SQL work is bounded by a progress limit of approximately one million VM steps or two seconds, plus SQLite's lock timeout. Reads cap the row payload at approximately 256 KiB and report truncation; page with deterministic ORDER BY and filters. BLOB results are encoded as base64 objects. Read/RETURNING statements are not accepted by db_execute. SQL limits may reject expensive queries even if valid.
 
@@ -240,7 +241,7 @@ This copies the stopped container's original volume contents, including SQLite j
 
 ## Download and upload full project SQL
 
-Refresh the custom app's tools after upgrading. There are eleven tools, including:
+Refresh the custom app's tools after upgrading. There are twelve tools, including:
 
 - `export_sql()`: consistent full-project SQL snapshot and a private download link.
 - `import_sql()`: opens a private upload flow; `import_sql(import_id=...)` validates/previews; `import_sql(import_id=..., apply=true)` restores after explicit user authorization.
@@ -256,3 +257,39 @@ Links expire after 15 minutes; uploads are accepted once and capped at 2 MiB, 50
 Supported snapshots contain current-version system schemas, ordinary `data_*` tables, and indexes. Views, triggers, virtual tables, arbitrary table names, extension loading, file attachment, and PRAGMAs in uploaded SQL are rejected. Different backend schema versions may require an offline migration. SQLite validates integrity and foreign keys before restore. The backup API applies a validated snapshot atomically; project operations are serialized in this single-process deployment to avoid in-flight writes being interleaved with restoration. Run one backend worker; coordinate any external database access yourself.
 
 Local HTTP transfer/restore behavior is tested; ChatGPT's rendering of browser links and real ngrok browser transfers require end-to-end validation after deployment.
+
+
+## Relational schemas and controlled migrations
+
+The agent interprets user intent and follows skills. SQLite enforces storage rules and computes results; Python authenticates and controls access. A generic backend does not require every record to be stored as JSON. Prefer STRICT tables, foreign keys, NOT NULL, CHECK/UNIQUE constraints, appropriate indexes, and SQL joins/aggregation. Use JSON only for genuinely document-shaped optional data or compatibility with existing records.
+
+`db_schema` now reports CREATE TABLE SQL, STRICT status, column defaults/generated status, foreign keys, and indexes as structured metadata. This exposes constraints so the agent can respect the database's actual rules.
+
+`db_migrate` accepts:
+
+```json
+{
+  "migration_id": "example-v1",
+  "statements": [{"sql": "CREATE TABLE data_example(id TEXT PRIMARY KEY, amount_minor INTEGER NOT NULL CHECK(amount_minor > 0), currency TEXT NOT NULL) STRICT", "params": []}],
+  "apply": false
+}
+```
+
+The preview executes in a transaction and rolls back, returning before/after schema changes, per-table row counts (including rows lost by table removal), changed-row count, and a preview_hash. Show that plan and its effects to the user before applying. Call the same tool with identical migration_id/statements, `apply=true`, and the returned preview_hash. The hash binds this project, starting schema, migration ID, and statements; a changed schema or plan requires another preview. It does not freeze current data: apply reexecutes the plan and rechecks all constraints against current records.
+
+Applied migrations write one audit entry per statement and an internal retry receipt atomically. Repeating the same applied migration_id/statements returns its receipt; using that ID with different SQL fails. Failed plans roll back DDL, backfills, audit entries, and receipts together. No arbitrary transaction control, PRAGMAs, ATTACH, extension loading, protected-table changes, views, triggers, or virtual tables are exposed. Standard table/index creation, ALTER TABLE (add/rename/drop columns where SQLite supports it), table/index removal, and parameterized data backfills are supported. DROP and ALTER of the compatibility data_records schema are blocked; ordinary explicit data writes still use their existing permissions.
+
+SQLite implements some ALTER operations using internal schema scans and quick-check helpers; those helpers are enabled only while executing a single ALTER TABLE statement. Direct PRAGMA access remains denied. Migrations are capped at 50 statements, 256 KiB input, approximately two million VM steps/five seconds, and the existing SQL/value limits. Large rebuilds require an offline migration.
+
+An example finance schema is in `examples/finance_relational.json`. It proposes categories, expenses, constraints, and indexes; it is not automatically applied and does not move existing records. The agent can read or reproduce the plan, preview it, explain tradeoffs, and obtain authorization before applying. A relational summary can then be computed directly in SQLite:
+
+```sql
+SELECT c.name AS category, e.currency, SUM(e.amount_minor) AS total_minor
+FROM data_expenses AS e
+LEFT JOIN data_categories AS c ON c.id = e.category_id
+GROUP BY c.id, c.name, e.currency;
+```
+
+For existing JSON records: inspect their actual fields, units, currencies, precision, and invalid/missing values first. Propose a separate, explicit INSERT ... SELECT backfill into relational tables. Preview and apply only after authorization. Verify row counts, totals per currency, constraints, and representative records; keep legacy rows until the user explicitly authorizes cleanup. Do not silently multiply money or invent missing fields. Update the project's skill after the agreed schema and conversion have been verified; backend upgrades never overwrite skill Markdown.
+
+Full SQL export/import includes the migration ledger and relational schema/indexes. Pre-ledger backups can be restored by adding an empty migration ledger during validation. Other incompatible system schemas still require an offline migration.

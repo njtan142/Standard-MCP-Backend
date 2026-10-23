@@ -39,7 +39,7 @@ def test_auth_and_mcp(tmp_path, signing):
         initialized = call("initialize", {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "test", "version": "1"}})
         assert initialized.status_code == 200, initialized.text
         tools = call("tools/list").json()["result"]["tools"]
-        assert {t["name"] for t in tools} == {"about", "list_skills", "get_skill", "create_skill", "update_skill", "delete_skill", "db_schema", "db_query", "db_execute", "export_sql", "import_sql"}
+        assert {t["name"] for t in tools} == {"about", "list_skills", "get_skill", "create_skill", "update_skill", "delete_skill", "db_schema", "db_query", "db_execute", "export_sql", "import_sql", "db_migrate"}
         result = call("tools/call", {"name": "about", "arguments": {}}).json()["result"]
         assert "No enabled skills" in result["content"][0]["text"]
         assert not result.get("isError")
@@ -185,7 +185,7 @@ def test_query_project_connections(tmp_path, signing):
             assert client.post(url, headers=headers, json=body).status_code == 200
             assert (tmp_path / f"{project}.sqlite3").is_file()
             listed = client.post(url, headers=headers, json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"}).json()
-            assert {tool["name"] for tool in listed["result"]["tools"]} == {"about", "list_skills", "get_skill", "create_skill", "update_skill", "delete_skill", "db_schema", "db_query", "db_execute", "export_sql", "import_sql"}
+            assert {tool["name"] for tool in listed["result"]["tools"]} == {"about", "list_skills", "get_skill", "create_skill", "update_skill", "delete_skill", "db_schema", "db_query", "db_execute", "export_sql", "import_sql", "db_migrate"}
             result = client.post(url, headers=headers, json={"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "about", "arguments": {}}}).json()["result"]
             assert f"Project: {project}" in result["content"][0]["text"]
         from app.database import SkillRegistry
@@ -350,3 +350,27 @@ def test_mcp_data_tools_owner_isolation_and_structured_audit(tmp_path, signing):
         denied = client.post("/mcp?project=denied", headers={**headers, "Authorization": "Bearer " + signing(sub="other-user")}, json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "db_execute", "arguments": args}})
         assert denied.status_code == 401
         assert not (tmp_path / "denied.sqlite3").exists()
+
+
+def test_mcp_migration_preview_apply_owner_and_project_boundary(tmp_path, signing):
+    settings=Settings('https://workspace.example',str(tmp_path),'https://issuer.example/','https://issuer.example/jwks','https://workspace.example/mcp',owner_subject='user')
+    plan={'migration_id':'typed-v1','statements':[{'sql':'CREATE TABLE data_typed(id TEXT PRIMARY KEY, amount INTEGER CHECK(amount>0)) STRICT','params':[]}]}
+    headers={'Authorization':'Bearer '+signing(),'Accept':'application/json, text/event-stream'}
+    with TestClient(create_app(settings),base_url=settings.public_url) as client:
+        def call(arguments,project='finance',authorization=headers):
+            return client.post(f'/mcp?project={project}',headers=authorization,json={'jsonrpc':'2.0','id':1,'method':'tools/call','params':{'name':'db_migrate','arguments':arguments}})
+        preview=call(plan).json()['result']['structuredContent']
+        assert preview['status']=='preview'
+        denied=call({**plan,'apply':True,'preview_hash':preview['preview_hash']},authorization={**headers,'Authorization':'Bearer '+signing(sub='different')})
+        assert denied.status_code==401
+        cross_project=call({**plan,'apply':True,'preview_hash':preview['preview_hash']},project='other').json()['result']
+        assert cross_project['isError']
+        applied=call({**plan,'apply':True,'preview_hash':preview['preview_hash']}).json()['result']['structuredContent']
+        assert applied['status']=='applied'
+        # Same project: retries preserve receipt, and a separate project is unchanged.
+        assert call({**plan,'apply':True,'preview_hash':preview['preview_hash']}).json()['result']['structuredContent']['replayed']
+        from app.database import SkillRegistry
+        from app.data import DataService
+        assert 'data_typed' in {table['name'] for table in DataService(SkillRegistry(str(tmp_path/'finance.sqlite3'))).schema()['tables']}
+        other=SkillRegistry(str(tmp_path/'other.sqlite3'));other.initialize()
+        assert 'data_typed' not in {table['name'] for table in DataService(other).schema()['tables']}

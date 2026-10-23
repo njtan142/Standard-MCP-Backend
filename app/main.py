@@ -15,8 +15,9 @@ from mcp.server.transport_security import TransportSecuritySettings
 from app.auth import JWTVerifier, OwnerVerifier
 from app.config import Settings
 from app.database import SkillRegistry
-from app.models import DeletedSkill, Skill, SkillSummary, SQLStatement, DatabaseSchema, QueryResult, ExecuteResult, SQLTransferResult
+from app.models import DeletedSkill, Skill, SkillSummary, SQLStatement, DatabaseSchema, QueryResult, ExecuteResult, SQLTransferResult, MigrationResult
 from app.data import DataService
+from app.migrations import Migrations
 from app.transfers import SQLTransfers
 from app.file_routes import file_router
 from app.observability import RequestLoggingMiddleware, configure_logging, event, project_name
@@ -93,6 +94,13 @@ def project_server(settings: Settings, project: str, registry: SkillRegistry, ve
     def db_execute(statements: Annotated[list[SQLStatement], Field(min_length=1, max_length=50)], idempotency_key: str) -> ExecuteResult:
         """Atomically execute 1–50 parameterized INSERT/UPDATE/DELETE statements on data_* tables, with audit history. No RETURNING, DDL, or transaction SQL. Use a fresh idempotency_key per intended batch; reuse it only for identical retries. Confirm destructive changes with the user."""
         return ExecuteResult.model_validate(data.execute([statement.model_dump() for statement in statements], idempotency_key))
+
+    migrations = Migrations(registry)
+
+    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True})
+    def db_migrate(migration_id: str, statements: Annotated[list[SQLStatement], Field(min_length=1, max_length=50)], apply: bool = False, preview_hash: str | None = None) -> MigrationResult:
+        """Preview controlled relational schema migrations and backfills. Supports data_* tables and data_* indexes: CREATE TABLE/INDEX, ALTER TABLE, DROP TABLE/INDEX, plus data INSERT/UPDATE/DELETE. Prefer STRICT tables, constraints, relationships, indexes, and SQL aggregation. No system/audit changes, views, triggers, virtual tables, PRAGMAs, or transaction SQL. Preserve legacy data_records. First call apply=false; show the user the changes and get authorization, then apply identical SQL with the returned preview_hash. Applied migration_ids are retry-safe."""
+        return MigrationResult.model_validate(migrations.migrate(migration_id, [statement.model_dump() for statement in statements], apply, preview_hash))
 
     transfers = SQLTransfers(settings, project, registry)
 

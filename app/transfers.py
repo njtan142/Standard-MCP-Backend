@@ -125,7 +125,7 @@ def split_sql(text):
     return statements
 
 
-SYSTEM_TABLES = {'system_skills', 'audit_mutations', 'system_write_requests', 'system_sql_imports'}
+SYSTEM_TABLES = {'system_skills', 'audit_mutations', 'system_write_requests', 'system_sql_imports', 'system_migrations'}
 
 
 def allowed_table(name):
@@ -231,6 +231,8 @@ class SQLTransfers:
                     return sqlite3.SQLITE_DENY
                 if action == sqlite3.SQLITE_CREATE_TABLE and allowed_table(first):
                     return sqlite3.SQLITE_OK
+                if action == sqlite3.SQLITE_REINDEX and (re.fullmatch(r"data_[a-z][a-z0-9_]*", first or "") or (first or "").startswith("sqlite_autoindex_")):
+                    return sqlite3.SQLITE_OK
                 if action == sqlite3.SQLITE_CREATE_INDEX and allowed_table(second):
                     return sqlite3.SQLITE_OK
                 if action in {sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_READ} and (allowed_table(first) or first in {'sqlite_master', 'sqlite_schema'}):
@@ -268,6 +270,12 @@ class SQLTransfers:
                 if existing:
                     return {**json.loads(existing[0]), 'replayed': True}
                 expected = {row['name']: normalized_schema(row['sql']) for row in destination.execute("SELECT name,sql FROM sqlite_schema WHERE type='table'") if row['name'] in SYSTEM_TABLES}
+                # Older snapshots predate the migration ledger; add that empty
+                # metadata table without changing restored records or skills.
+                if not stage.execute("SELECT 1 FROM sqlite_schema WHERE name='system_migrations'").fetchone():
+                    definition = destination.execute("SELECT sql FROM sqlite_schema WHERE name='system_migrations'").fetchone()
+                    stage.execute(definition[0])
+                    schema = list(stage.execute("SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE sql IS NOT NULL"))
                 actual = {row['name']: normalized_schema(row['sql']) for row in schema if row['type']=='table' and row['name'] in SYSTEM_TABLES}
                 if actual != expected:
                     raise ValueError('Full restore requires the current project system-table schemas; use export_sql from the same backend version')
