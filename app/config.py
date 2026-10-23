@@ -1,7 +1,6 @@
-import json
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -14,7 +13,6 @@ class Settings:
     jwks_url: str = ""
     audience: str = ""
     local_no_auth: bool = False
-    projects: dict[str, str] = field(default_factory=lambda: {"finance": "finance.sqlite3"})
 
     def __post_init__(self):
         url = urlsplit(self.public_url)
@@ -25,18 +23,6 @@ class Settings:
                 raise ValueError("Unauthenticated mode requires a loopback HTTP PUBLIC_URL")
         elif url.scheme != "https":
             raise ValueError("PUBLIC_URL must use HTTPS")
-        if not isinstance(self.projects, dict) or not self.projects:
-            raise ValueError("PROJECTS_JSON must be a nonempty project-to-filename object")
-        paths = set()
-        for name, filename in self.projects.items():
-            if not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9-]{0,62}", name) or name in {"health", "docs", "redoc", "openapi"}:
-                raise ValueError("Invalid or reserved project name")
-            if not isinstance(filename, str) or not re.fullmatch(r"[a-zA-Z0-9_-]+\.sqlite3", filename):
-                raise ValueError("Project database must be a plain .sqlite3 filename")
-            path = (Path(self.data_dir) / filename).resolve()
-            if path.parent != Path(self.data_dir).resolve() or path in paths:
-                raise ValueError("Project databases must be distinct files inside DATA_DIR")
-            paths.add(path)
         if not self.local_no_auth:
             for name, value in (("OAUTH_ISSUER", self.issuer), ("OAUTH_JWKS_URL", self.jwks_url)):
                 if urlsplit(value).scheme != "https" or not urlsplit(value).hostname:
@@ -53,5 +39,13 @@ class Settings:
             jwks_url=os.environ.get("OAUTH_JWKS_URL", ""),
             audience=os.environ.get("OAUTH_AUDIENCE", ""),
             local_no_auth=os.environ.get("LOCAL_NO_AUTH") == "1",
-            projects=json.loads(os.environ.get("PROJECTS_JSON", '{"finance":"finance.sqlite3"}')),
         )
+
+    def project_path(self, project: str) -> Path:
+        if not re.fullmatch(r"[a-z][a-z0-9-]{0,62}", project) or project in {"health", "docs", "redoc", "openapi"}:
+            raise ValueError("Invalid or reserved project name")
+        root = Path(self.data_dir).resolve()
+        path = root / f"{project}.sqlite3"
+        if path.is_symlink() or path.resolve().parent != root:
+            raise ValueError("Project database must be a regular file inside DATA_DIR")
+        return path

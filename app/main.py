@@ -1,28 +1,28 @@
-from contextlib import AsyncExitStack, asynccontextmanager
-from pathlib import Path
+import asyncio
+import re
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI
+from starlette.responses import JSONResponse
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
-from app.auth import JWTVerifier
+from app.auth import JWTVerifier, ProjectVerifier
 from app.config import Settings
 from app.database import SkillRegistry
 
 
-def project_server(settings: Settings, project: str, registry: SkillRegistry):
+def project_server(settings: Settings, project: str, registry: SkillRegistry, verifier=None):
     authority = urlsplit(settings.public_url).netloc
     mcp = FastMCP(
         f"Skill Workspace: {project}", stateless_http=True, json_response=True,
+        streamable_http_path=f"/{project}/mcp",
         transport_security=TransportSecuritySettings(
             enable_dns_rebinding_protection=True,
             allowed_hosts=[authority], allowed_origins=[settings.public_url],
         ),
-        token_verifier=None if settings.local_no_auth else JWTVerifier(
-            settings.issuer, settings.audience, settings.jwks_url
-        ),
+        token_verifier=None if settings.local_no_auth else ProjectVerifier(verifier, project, registry),
         auth=None if settings.local_no_auth else AuthSettings(
             issuer_url=settings.issuer,
             resource_server_url=f"{settings.public_url}/{project}/mcp",
@@ -51,35 +51,48 @@ def project_server(settings: Settings, project: str, registry: SkillRegistry):
 
 def create_app(settings: Settings | None = None):
     settings = settings or Settings.from_env()
-    registries = {
-        project: SkillRegistry(str(Path(settings.data_dir) / filename))
-        for project, filename in settings.projects.items()
-    }
-    servers = {project: project_server(settings, project, registry) for project, registry in registries.items()}
-    transports = {project: server.streamable_http_app() for project, server in servers.items()}
-
-    @asynccontextmanager
-    async def lifespan(app):
-        async with AsyncExitStack() as stack:
-            for project, server in servers.items():
-                registries[project].initialize()
-                await stack.enter_async_context(server.session_manager.run())
-            yield
-
-    app = FastAPI(title="Skill Workspaces", lifespan=lifespan)
+    verifier = None if settings.local_no_auth else JWTVerifier(
+        settings.issuer, settings.audience, settings.jwks_url
+    )
+    app = FastAPI(title="Skill Workspaces")
 
     @app.get("/health")
     def health():
-        for registry in registries.values():
-            with registry.connect() as connection:
-                connection.execute("SELECT 1").fetchone()
+        # Liveness does not provision projects or require an existing database.
         return {"status": "ok"}
 
-    for project, transport in transports.items():
-        # RFC 9728 metadata lives at the origin, outside the project's mount.
-        metadata = [route for route in transport.routes if route.path.startswith("/.well-known/")]
-        for route in metadata:
-            transport.routes.remove(route)
-            app.router.routes.append(route)
-        app.mount(f"/{project}", transport)
+    async def dispatch(scope, receive, send):
+        path = scope["path"]
+        match = re.fullmatch(r"/(?:\.well-known/oauth-protected-resource/)?([a-z][a-z0-9-]{0,62})/mcp", path)
+        if not match:
+            await JSONResponse({"detail": "Not Found"}, status_code=404)(scope, receive, send)
+            return
+        project = match[1]
+        try:
+            registry = SkillRegistry(str(settings.project_path(project)))
+        except ValueError:
+            await JSONResponse({"detail": "Invalid project"}, status_code=404)(scope, receive, send)
+            return
+        if path.startswith("/.well-known/"):
+            if settings.local_no_auth:
+                response = JSONResponse({"detail": "Not Found"}, status_code=404)
+            else:
+                response = JSONResponse({
+                    "resource": f"{settings.public_url}/{project}/mcp",
+                    "authorization_servers": [settings.issuer],
+                    "scopes_supported": ["skills:read", "projects:manage"],
+                    "bearer_methods_supported": ["header"],
+                })
+            await response(scope, receive, send)
+            return
+        if settings.local_no_auth:
+            await asyncio.to_thread(registry.initialize)
+        server = project_server(settings, project, registry, verifier)
+        transport = server.streamable_http_app()
+        # Stateless transport: each request has its own manager, with no growing
+        # cache of arbitrary public project names. Authentication provisions DBs.
+        async with server.session_manager.run():
+            await transport(scope, receive, send)
+
+    app.mount("/", dispatch)
     return app

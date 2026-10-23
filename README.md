@@ -4,22 +4,19 @@ A Python, SQLite-backed foundation for project-specific, skill-driven MCP servic
 
 ## Projects
 
-An explicit `PROJECTS_JSON` registry maps URL project names to database filenames:
+Projects are derived automatically from the connection URL. No project registry or per-project environment setting is needed:
 
-```json
-{"finance":"finance.sqlite3","projects":"projects.sqlite3"}
-```
+| MCP connection | Automatically created database under DATA_DIR |
+| --- | --- |
+| `/finance/mcp` | `finance.sqlite3` |
+| `/projects/mcp` | `projects.sqlite3` |
+| `/any-new-project/mcp` | `any-new-project.sqlite3` |
 
-With `PUBLIC_URL=https://tough-jay-refined.ngrok-free.app`:
+Add `https://tough-jay-refined.ngrok-free.app/finance/mcp` as a ChatGPT connection. The first authorized MCP request initializes the finance database and its skill table. A new valid project path works without a backend restart. Reconnecting reuses its existing database and preserves records.
 
-| MCP connection | Database under DATA_DIR | Required scopes |
-| --- | --- | --- |
-| `/finance/mcp` | `finance.sqlite3` | `skills:read project:finance` |
-| `/projects/mcp` | `projects.sqlite3` | `skills:read project:projects` |
+Names must start with a lowercase letter and contain only lowercase letters, digits, and hyphens, up to 63 characters. Reserved names and unsafe database paths are rejected. Public metadata discovery, unauthenticated requests, and denied tokens never create databases. SQLite files remain separate per project; future data and audit tools must preserve this separation.
 
-Each configured database has its own skill registry. Future data and audit tools must preserve this separation. `.sql` files are SQL text; these are SQLite `.sqlite3` database files. Unknown projects return 404 and never create databases. Registry validation rejects path traversal, duplicate files, and symlinks escaping DATA_DIR. Project additions require updating the registry and restarting the backend. Skill directory changes are visible immediately without restart.
-
-The old `/mcp` endpoint is removed. `PUBLIC_URL` now means the HTTPS **origin**, without a trailing slash or path. `DATA_DIR` replaces `DATABASE_PATH`. Existing `data/workspace.sqlite3` files are left untouched; they are not automatically assigned to finance. Explicitly map an existing filename if you intend to reuse it.
+The old `/mcp` endpoint is removed. `PUBLIC_URL` means the HTTPS **origin**, without a trailing slash or path. `DATA_DIR` replaces `DATABASE_PATH`. `PROJECTS_JSON` is no longer used and can be removed from an existing `.env`. Existing `workspace.sqlite3` is left untouched; no data is moved automatically.
 
 ## Local development
 
@@ -31,7 +28,7 @@ uv run pytest -q
 LOCAL_NO_AUTH=1 uv run uvicorn app.main:create_app --factory --host 127.0.0.1 --port 8000 --no-proxy-headers
 ```
 
-The default local project is finance. Connect a local MCP client to `http://127.0.0.1:8000/finance/mcp`. SQLite is initialized idempotently at `data/finance.sqlite3`. `GET /health` checks all configured databases. Never expose LOCAL_NO_AUTH mode through a tunnel; it is exclusively for a loopback-bound development process. Production Compose does not enable it or publish backend ports.
+Connect a local MCP client to `http://127.0.0.1:8000/finance/mcp`. The first local MCP request initializes `data/finance.sqlite3`. Any valid project path works locally. `GET /health` is a liveness check and does not create or inspect project databases. Never expose LOCAL_NO_AUTH mode through a tunnel; it is exclusively for a loopback-bound development process. Production Compose does not enable it or publish backend ports.
 
 ## OAuth and project access
 
@@ -39,13 +36,15 @@ ChatGPT → ngrok HTTPS tunnel → Python MCP resource server → per-project SQ
 
 An external OAuth authorization server handles sign-in and consent. Python validates RS256 JWT access tokens against configured JWKS, requiring expiry, issuer, audience, subject, and scopes. Configure a shared API identifier as `OAUTH_AUDIENCE`; it is validated independently of project resource URLs.
 
-Grant each user only their allowed project scopes at the authorization server. A finance connection requires both `skills:read` and `project:finance`; knowing a path does not grant access. The provider must enforce scope grants, not allow any user to self-select any project. Authorized users of the same project share that project's entire dataset; row-level isolation is not implemented.
+For your private deployment, grant your owner account `skills:read` and `projects:manage` once at the authorization server. This lets that account automatically create and access any project without registering individual project scopes. Configure these two API permissions in Auth0 and assign them only to trusted owners through RBAC. Do not grant `projects:manage` to untrusted users.
 
-Protected-resource metadata is exposed at `/.well-known/oauth-protected-resource/finance/mcp` (and equivalent paths per configured project). Unauthenticated requests advertise the correct metadata URL. Configure your provider and ChatGPT client registration for these resource URLs and requested scopes. Real provider compatibility, JWKS retrieval, and ChatGPT sign-in remain to be validated. This application is not an authorization server; GitHub access tokens or OIDC ID tokens are not substitutes for access tokens issued for this API.
+For restricted access later, tokens can instead carry `skills:read` and `project:finance` (or the appropriate project name). Such tokens can create/access that project only. The backend still enforces project grants; knowing a URL does not grant access. Users authorized for the same project share its complete dataset; row-level isolation is not implemented.
+
+Protected-resource metadata is exposed at `/.well-known/oauth-protected-resource/finance/mcp` (and equivalent paths for any valid project name). Unauthenticated requests advertise the correct metadata URL. Configure your provider and ChatGPT client registration for these resource URLs and the `skills:read projects:manage` scopes advertised in discovery. Real provider compatibility, JWKS retrieval, and ChatGPT sign-in remain to be validated. This application is not an authorization server; GitHub access tokens or OIDC ID tokens are not substitutes for access tokens issued for this API.
 
 ## Docker Compose and ngrok
 
-1. Copy `.env.example` to `.env`. Your hostname is prefilled as `tough-jay-refined.ngrok-free.app`. Set the registered projects, OAuth issuer/JWKS/audience, and ngrok authtoken locally. Never commit credentials or paste them into chat.
+1. Copy `.env.example` to `.env`. Your hostname is prefilled as `tough-jay-refined.ngrok-free.app`. Set the OAuth issuer/JWKS/audience and ngrok authtoken locally. No project list is required. Never commit credentials or paste them into chat.
 2. Use the ngrok account that owns that dev domain. The sidecar runs `ngrok http --url=tough-jay-refined.ngrok-free.app http://backend:8000`, forwarding all project and metadata paths while preserving the public Host header. Avoid running a second tunnel competing for the same domain.
 3. Run `docker compose up --build -d`. Inspect `docker compose logs backend tunnel` for startup issues; do not share logs containing secrets.
 4. Verify public `/health`, project metadata, and an unauthenticated 401 at `/finance/mcp`. Add `https://tough-jay-refined.ngrok-free.app/finance/mcp` as the ChatGPT connection and complete OAuth sign-in. Verify `about` and `list_skills` after sign-in. Add other projects as separate ChatGPT connections.
@@ -57,7 +56,7 @@ SQLite files persist in the `workspace-data` Docker volume. Never run `docker co
 
 ## Validation and remaining milestones
 
-Automated tests exercise MCP initialization, discovery, calls, resources, OAuth metadata, invalid-token rejection, per-project scopes, isolated registries, unknown projects, and unsafe project configuration. Local live HTTP client checks are run separately. Real tunnel and ChatGPT tests need external credentials and provider setup.
+Automated tests exercise MCP initialization, discovery, calls, resources, OAuth metadata, invalid-token rejection, per-project scopes, isolated registries, automatic provisioning, denied-request non-provisioning, reconnect persistence, and unsafe project names. Local live HTTP client checks are run separately. Real tunnel and ChatGPT tests need external credentials and provider setup.
 
 The cloud Docker builder has previously failed package-registry DNS resolution. A temporary equivalent image using hash-verified downloaded wheels validated the non-root container; the standard online Dockerfile must still run on a builder with working DNS. CI includes that build but has not been executed on GitHub here.
 

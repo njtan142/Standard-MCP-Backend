@@ -30,3 +30,23 @@ class JWTVerifier:
 
     async def verify_token(self, token: str):
         return await asyncio.to_thread(self._verify, token)
+
+
+class ProjectVerifier:
+    """Apply project grants and provision only after complete authorization."""
+
+    def __init__(self, verifier, project, registry):
+        self.verifier = verifier
+        self.project = project
+        self.registry = registry
+
+    async def verify_token(self, token: str):
+        access = await self.verifier.verify_token(token)
+        if access is None:
+            return None
+        scope = f"project:{self.project}"
+        if "projects:manage" in access.scopes and scope not in access.scopes:
+            access = access.model_copy(update={"scopes": [*access.scopes, scope]})
+        if "skills:read" in access.scopes and scope in access.scopes:
+            await asyncio.to_thread(self.registry.initialize)
+        return access

@@ -77,9 +77,10 @@ def test_live_skill_directory(tmp_path):
 
 def test_project_isolation_and_scopes(tmp_path, signing):
     from app.database import SkillRegistry
-    settings = Settings("https://workspace.example", str(tmp_path), "https://issuer.example/", "https://issuer.example/jwks", "https://workspace.example/mcp", projects={"finance": "finance.sqlite3", "projects": "projects.sqlite3"})
+    settings = Settings("https://workspace.example", str(tmp_path), "https://issuer.example/", "https://issuer.example/jwks", "https://workspace.example/mcp")
     with TestClient(create_app(settings), base_url=settings.public_url) as client:
         finance = SkillRegistry(str(tmp_path / "finance.sqlite3"))
+        finance.initialize()
         with finance.connect() as connection:
             connection.execute("INSERT INTO system_skills (name, description, content) VALUES ('finance-only', 'Private finance skill', '# Finance')")
         headers = {"Authorization": "Bearer " + signing(), "Accept": "application/json, text/event-stream"}
@@ -99,23 +100,47 @@ def test_project_isolation_and_scopes(tmp_path, signing):
             assert metadata_url in challenge.headers["www-authenticate"]
             metadata = client.get(metadata_url).json()
             assert metadata["resource"] == f"{settings.public_url}/{project}/mcp"
-            assert f"project:{project}" in metadata["scopes_supported"]
-        assert client.post("/unknown/mcp", json=body).status_code == 404
+            assert "projects:manage" in metadata["scopes_supported"]
+        assert client.post("/unknown/mcp", json=body).status_code == 401
         assert client.post("/mcp", json=body).status_code == 404
         assert not (tmp_path / "unknown.sqlite3").exists()
 
 
-@pytest.mark.parametrize("projects", [
-    {"../finance": "finance.sqlite3"}, {"finance": "../finance.sqlite3"},
-    {"finance": "/tmp/finance.sqlite3"}, {"finance": "finance.sql"},
-    {"finance": "shared.sqlite3", "projects": "shared.sqlite3"}, {},
-])
-def test_invalid_project_registry(projects):
+@pytest.mark.parametrize("project", ["../finance", "Finance", "/tmp/finance", "finance.sql", "health", "", "a" * 64])
+def test_invalid_project_names(project):
     with pytest.raises(ValueError):
-        Settings("http://127.0.0.1:8000", local_no_auth=True, projects=projects)
+        Settings("http://127.0.0.1:8000", local_no_auth=True).project_path(project)
 
 
 def test_database_symlink_escape(tmp_path):
     (tmp_path / "finance.sqlite3").symlink_to(tmp_path.parent / "outside.sqlite3")
     with pytest.raises(ValueError):
-        Settings("http://127.0.0.1:8000", data_dir=str(tmp_path), local_no_auth=True)
+        Settings("http://127.0.0.1:8000", data_dir=str(tmp_path), local_no_auth=True).project_path("finance")
+
+
+def test_automatic_provisioning(tmp_path, signing):
+    settings = Settings("https://workspace.example", str(tmp_path), "https://issuer.example/", "https://issuer.example/jwks", "https://workspace.example/mcp")
+    headers = {"Accept": "application/json, text/event-stream"}
+    body = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "test", "version": "1"}}}
+    with TestClient(create_app(settings), base_url=settings.public_url) as client:
+        assert client.get("/health").status_code == 200
+        assert list(tmp_path.iterdir()) == []
+        assert client.get("/.well-known/oauth-protected-resource/new-project/mcp").status_code == 200
+        assert client.post("/new-project/mcp", headers=headers, json=body).status_code == 401
+        headers["Authorization"] = "Bearer " + signing()
+        assert client.post("/new-project/mcp", headers=headers, json=body).status_code == 403
+        headers["Authorization"] = "Bearer " + signing(scope="projects:manage")
+        assert client.post("/new-project/mcp", headers=headers, json=body).status_code == 403
+        assert list(tmp_path.iterdir()) == []
+        headers["Authorization"] = "Bearer " + signing(scope="skills:read projects:manage")
+        response = client.post("/new-project/mcp", headers=headers, json=body)
+        assert response.status_code == 200, response.text
+        assert (tmp_path / "new-project.sqlite3").is_file()
+        from app.database import SkillRegistry
+        registry = SkillRegistry(str(tmp_path / "new-project.sqlite3"))
+        with registry.connect() as connection:
+            connection.execute("INSERT INTO system_skills (name, description, content) VALUES ('persist', 'keep', '# Keep')")
+        assert client.post("/new-project/mcp", headers=headers, json=body).status_code == 200
+        assert registry.list_skills()[0]["name"] == "persist"
+        assert client.post("/second/mcp", headers=headers, json=body).status_code == 200
+        assert (tmp_path / "second.sqlite3").is_file()
