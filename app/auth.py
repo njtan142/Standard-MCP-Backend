@@ -48,9 +48,10 @@ class JWTVerifier:
 class OwnerVerifier:
     """Authorize a single verified owner; provider roles/scopes are unnecessary."""
 
-    def __init__(self, verifier, owner_subject, registry):
+    def __init__(self, verifier, owner_subject, registry, debug_user_ids=False):
         self.verifier = verifier
         self.owner_subject = owner_subject
+        self.debug_user_ids = debug_user_ids
         self.registry = registry
 
     async def verify_token(self, token: str):
@@ -59,6 +60,8 @@ class OwnerVerifier:
             return None
         if access.subject != self.owner_subject:
             logger.warning("OAuth rejected: signed-in user does not match OWNER_SUBJECT")
+            if self.debug_user_ids:
+                logger.warning("OAuth owner diagnostic: signed_in_user_id=%r configured_owner_id=%r", access.subject, self.owner_subject)
             return None
         await asyncio.to_thread(self.registry.initialize)
         return access

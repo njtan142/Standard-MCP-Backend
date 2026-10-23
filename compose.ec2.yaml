@@ -8,6 +8,7 @@ services:
       OAUTH_JWKS_URL: ${OAUTH_JWKS_URL:?Set the JWKS URL}
       OAUTH_AUDIENCE: ${OAUTH_AUDIENCE:?Set the access token audience}
       OWNER_SUBJECT: ${OWNER_SUBJECT:?Set your Auth0 application user ID}
+      AUTH_DEBUG_USER_IDS: ${AUTH_DEBUG_USER_IDS:-0}
       DATA_DIR: /srv/data
     volumes:
       - workspace-data:/srv/data

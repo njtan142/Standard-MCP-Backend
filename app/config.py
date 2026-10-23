@@ -14,6 +14,7 @@ class Settings:
     audience: str = ""
     local_no_auth: bool = False
     owner_subject: str = ""
+    auth_debug_user_ids: bool = False
 
     def __post_init__(self):
         url = urlsplit(self.public_url)
@@ -43,6 +44,7 @@ class Settings:
             audience=os.environ.get("OAUTH_AUDIENCE", ""),
             local_no_auth=os.environ.get("LOCAL_NO_AUTH") == "1",
             owner_subject=os.environ.get("OWNER_SUBJECT", ""),
+            auth_debug_user_ids=os.environ.get("AUTH_DEBUG_USER_IDS") == "1",
         )
 
     def project_path(self, project: str) -> Path:

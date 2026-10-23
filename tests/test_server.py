@@ -229,3 +229,24 @@ def test_missing_bearer_diagnostic(tmp_path, caplog):
         assert client.post("/mcp?project=finance", json={}).status_code == 401
     assert "request has no Bearer authorization header" in caplog.text
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_owner_user_id_diagnostic_opt_in(tmp_path, signing, caplog, enabled):
+    settings = Settings("https://workspace.example", str(tmp_path), "https://issuer.example/", "https://issuer.example/jwks", "https://workspace.example/mcp", owner_subject="configured-owner", auth_debug_user_ids=enabled)
+    token = signing(sub="actual-signed-in-user")
+    with TestClient(create_app(settings), base_url=settings.public_url) as client:
+        response = client.post("/mcp?project=finance", headers={"Authorization": "Bearer " + token}, json={})
+        assert response.status_code == 401
+    assert ("signed_in_user_id='actual-signed-in-user'" in caplog.text) is enabled
+    assert ("configured_owner_id='configured-owner'" in caplog.text) is enabled
+    assert token not in caplog.text
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_invalid_token_never_logs_user_id(tmp_path, signing, caplog):
+    settings = Settings("https://workspace.example", str(tmp_path), "https://issuer.example/", "https://issuer.example/jwks", "https://workspace.example/mcp", owner_subject="configured-owner", auth_debug_user_ids=True)
+    with TestClient(create_app(settings), base_url=settings.public_url) as client:
+        assert client.post("/mcp?project=finance", headers={"Authorization": "Bearer " + signing(sub="unverified-user", aud="wrong")}, json={}).status_code == 401
+    assert "signed_in_user_id" not in caplog.text
+    assert "unverified-user" not in caplog.text

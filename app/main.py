@@ -25,7 +25,7 @@ def project_server(settings: Settings, project: str, registry: SkillRegistry, ve
             enable_dns_rebinding_protection=True,
             allowed_hosts=[authority], allowed_origins=[settings.public_url],
         ),
-        token_verifier=None if settings.local_no_auth else OwnerVerifier(verifier, settings.owner_subject, registry),
+        token_verifier=None if settings.local_no_auth else OwnerVerifier(verifier, settings.owner_subject, registry, debug_user_ids=settings.auth_debug_user_ids),
         auth=None if settings.local_no_auth else AuthSettings(
             issuer_url=settings.issuer,
             resource_server_url=f"{settings.public_url}{endpoint_path}",
