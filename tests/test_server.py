@@ -16,14 +16,14 @@ def signing(monkeypatch):
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     monkeypatch.setattr(jwt.PyJWKClient, "get_signing_key_from_jwt", lambda self, token: SimpleNamespace(key=key.public_key()))
     def token(**overrides):
-        claims = {"iss": "https://issuer.example/", "aud": "https://workspace.example/mcp", "sub": "user", "exp": int(time.time()) + 300, "scope": "skills:read project:finance"}
+        claims = {"iss": "https://issuer.example/", "aud": "https://workspace.example/mcp", "sub": "user", "exp": int(time.time()) + 300, "scope": ""}
         claims.update(overrides)
         return jwt.encode(claims, key, algorithm="RS256")
     return token
 
 
 def test_auth_and_mcp(tmp_path, signing):
-    settings = Settings("https://workspace.example", str(tmp_path), "https://issuer.example/", "https://issuer.example/jwks", "https://workspace.example/mcp")
+    settings = Settings("https://workspace.example", str(tmp_path), "https://issuer.example/", "https://issuer.example/jwks", "https://workspace.example/mcp", owner_subject="user")
     with TestClient(create_app(settings), base_url="https://workspace.example") as client:
         assert client.get("/health").json() == {"status": "ok"}
         denied = client.post("/finance/mcp", json={})
@@ -44,7 +44,7 @@ def test_auth_and_mcp(tmp_path, signing):
         assert not result.get("isError")
         resources = call("resources/list").json()["result"]["resources"]
         assert resources[0]["uri"] == "workspace://about"
-        for claims, status in [({"aud": "wrong"}, 401), ({"iss": "https://wrong.example/"}, 401), ({"exp": 1}, 401), ({"scope": "data:read"}, 403)]:
+        for claims, status in [({"aud": "wrong"}, 401), ({"iss": "https://wrong.example/"}, 401), ({"exp": 1}, 401), ({"sub": "other-user"}, 401)]:
             headers["Authorization"] = "Bearer " + signing(**claims)
             assert call("tools/list").status_code == status
 
@@ -75,9 +75,9 @@ def test_live_skill_directory(tmp_path):
     assert registry.list_skills() == []
 
 
-def test_project_isolation_and_scopes(tmp_path, signing):
+def test_project_isolation_and_owner(tmp_path, signing):
     from app.database import SkillRegistry
-    settings = Settings("https://workspace.example", str(tmp_path), "https://issuer.example/", "https://issuer.example/jwks", "https://workspace.example/mcp")
+    settings = Settings("https://workspace.example", str(tmp_path), "https://issuer.example/", "https://issuer.example/jwks", "https://workspace.example/mcp", owner_subject="user")
     with TestClient(create_app(settings), base_url=settings.public_url) as client:
         finance = SkillRegistry(str(tmp_path / "finance.sqlite3"))
         finance.initialize()
@@ -88,19 +88,19 @@ def test_project_isolation_and_scopes(tmp_path, signing):
         response = client.post("/finance/mcp", headers=headers, json=body)
         assert response.status_code == 200
         assert "finance-only" in response.text
-        assert client.post("/projects/mcp", headers=headers, json=body).status_code == 403
-        headers["Authorization"] = "Bearer " + signing(scope="skills:read project:projects")
+        assert client.post("/projects/mcp", headers={**headers, "Authorization": "Bearer " + signing(sub="other-user", scope="skills:read projects:manage")}, json=body).status_code == 401
+        headers["Authorization"] = "Bearer " + signing()
         response = client.post("/projects/mcp", headers=headers, json=body)
         assert response.status_code == 200
         assert "finance-only" not in response.text
-        assert client.post("/finance/mcp", headers=headers, json=body).status_code == 403
+        assert client.post("/finance/mcp", headers={**headers, "Authorization": "Bearer " + signing(sub="other-user")}, json=body).status_code == 401
         for project in ("finance", "projects"):
             challenge = client.post(f"/{project}/mcp", json=body)
             metadata_url = f"{settings.public_url}/.well-known/oauth-protected-resource/{project}/mcp"
             assert metadata_url in challenge.headers["www-authenticate"]
             metadata = client.get(metadata_url).json()
             assert metadata["resource"] == f"{settings.public_url}/{project}/mcp"
-            assert "projects:manage" in metadata["scopes_supported"]
+            assert "scopes_supported" not in metadata
         assert client.post("/unknown/mcp", json=body).status_code == 401
         assert client.post("/mcp", json=body).status_code == 404
         assert not (tmp_path / "unknown.sqlite3").exists()
@@ -119,7 +119,7 @@ def test_database_symlink_escape(tmp_path):
 
 
 def test_automatic_provisioning(tmp_path, signing):
-    settings = Settings("https://workspace.example", str(tmp_path), "https://issuer.example/", "https://issuer.example/jwks", "https://workspace.example/mcp")
+    settings = Settings("https://workspace.example", str(tmp_path), "https://issuer.example/", "https://issuer.example/jwks", "https://workspace.example/mcp", owner_subject="user")
     headers = {"Accept": "application/json, text/event-stream"}
     body = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "test", "version": "1"}}}
     with TestClient(create_app(settings), base_url=settings.public_url) as client:
@@ -127,12 +127,12 @@ def test_automatic_provisioning(tmp_path, signing):
         assert list(tmp_path.iterdir()) == []
         assert client.get("/.well-known/oauth-protected-resource/new-project/mcp").status_code == 200
         assert client.post("/new-project/mcp", headers=headers, json=body).status_code == 401
-        headers["Authorization"] = "Bearer " + signing()
-        assert client.post("/new-project/mcp", headers=headers, json=body).status_code == 403
-        headers["Authorization"] = "Bearer " + signing(scope="projects:manage")
-        assert client.post("/new-project/mcp", headers=headers, json=body).status_code == 403
+        headers["Authorization"] = "Bearer " + signing(sub="other-user")
+        assert client.post("/new-project/mcp", headers=headers, json=body).status_code == 401
+        headers["Authorization"] = "Bearer " + signing(sub="other-user", scope="skills:read projects:manage")
+        assert client.post("/new-project/mcp", headers=headers, json=body).status_code == 401
         assert list(tmp_path.iterdir()) == []
-        headers["Authorization"] = "Bearer " + signing(scope="skills:read projects:manage")
+        headers["Authorization"] = "Bearer " + signing()
         response = client.post("/new-project/mcp", headers=headers, json=body)
         assert response.status_code == 200, response.text
         assert (tmp_path / "new-project.sqlite3").is_file()
@@ -144,3 +144,23 @@ def test_automatic_provisioning(tmp_path, signing):
         assert registry.list_skills()[0]["name"] == "persist"
         assert client.post("/second/mcp", headers=headers, json=body).status_code == 200
         assert (tmp_path / "second.sqlite3").is_file()
+
+
+def test_remote_owner_configuration_required():
+    kwargs = dict(public_url="https://workspace.example", issuer="https://issuer.example/", jwks_url="https://issuer.example/jwks", audience="workspace")
+    for owner in ("", " user", "user "):
+        with pytest.raises(ValueError, match="OWNER_SUBJECT"):
+            Settings(**kwargs, owner_subject=owner)
+
+
+def test_forged_owner_and_invalid_tokens_do_not_provision(tmp_path, signing):
+    settings = Settings("https://workspace.example", str(tmp_path), "https://issuer.example/", "https://issuer.example/jwks", "https://workspace.example/mcp", owner_subject="user")
+    claims = {"iss": settings.issuer, "aud": settings.audience, "sub": "user", "exp": int(time.time()) + 300}
+    attacker_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    forged = jwt.encode(claims, attacker_key, algorithm="RS256")
+    tokens = [forged, signing(sub="user", exp=1), signing(sub="user", aud="other"), signing(sub="user", iss="https://other.example/"), signing(sub="other-user", scope="skills:read projects:manage")]
+    with TestClient(create_app(settings), base_url=settings.public_url) as client:
+        for token in tokens:
+            response = client.post("/private/mcp", headers={"Authorization": "Bearer " + token, "Accept": "application/json, text/event-stream"}, json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+            assert response.status_code == 401
+            assert not (tmp_path / "private.sqlite3").exists()

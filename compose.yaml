@@ -7,6 +7,7 @@ services:
       OAUTH_ISSUER: ${OAUTH_ISSUER:?Set the OAuth issuer}
       OAUTH_JWKS_URL: ${OAUTH_JWKS_URL:?Set the JWKS URL}
       OAUTH_AUDIENCE: ${OAUTH_AUDIENCE:?Set the access token audience}
+      OWNER_SUBJECT: ${OWNER_SUBJECT:?Set your Auth0 application user ID}
       DATA_DIR: /srv/data
     volumes:
       - workspace-data:/srv/data

@@ -8,7 +8,7 @@ from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
-from app.auth import JWTVerifier, ProjectVerifier
+from app.auth import JWTVerifier, OwnerVerifier
 from app.config import Settings
 from app.database import SkillRegistry
 
@@ -22,11 +22,11 @@ def project_server(settings: Settings, project: str, registry: SkillRegistry, ve
             enable_dns_rebinding_protection=True,
             allowed_hosts=[authority], allowed_origins=[settings.public_url],
         ),
-        token_verifier=None if settings.local_no_auth else ProjectVerifier(verifier, project, registry),
+        token_verifier=None if settings.local_no_auth else OwnerVerifier(verifier, settings.owner_subject, registry),
         auth=None if settings.local_no_auth else AuthSettings(
             issuer_url=settings.issuer,
             resource_server_url=f"{settings.public_url}/{project}/mcp",
-            required_scopes=["skills:read", f"project:{project}"],
+            required_scopes=[],
             validate_token_resource=False,
         ),
     )
@@ -80,7 +80,6 @@ def create_app(settings: Settings | None = None):
                 response = JSONResponse({
                     "resource": f"{settings.public_url}/{project}/mcp",
                     "authorization_servers": [settings.issuer],
-                    "scopes_supported": ["skills:read", "projects:manage"],
                     "bearer_methods_supported": ["header"],
                 })
             await response(scope, receive, send)

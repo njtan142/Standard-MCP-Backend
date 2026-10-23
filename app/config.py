@@ -13,6 +13,7 @@ class Settings:
     jwks_url: str = ""
     audience: str = ""
     local_no_auth: bool = False
+    owner_subject: str = ""
 
     def __post_init__(self):
         url = urlsplit(self.public_url)
@@ -29,6 +30,8 @@ class Settings:
                     raise ValueError(f"{name} must be an HTTPS URL")
             if not self.audience:
                 raise ValueError("OAUTH_AUDIENCE is required")
+            if not self.owner_subject or self.owner_subject != self.owner_subject.strip():
+                raise ValueError("OWNER_SUBJECT must be the exact OAuth owner user ID")
 
     @classmethod
     def from_env(cls):
@@ -39,6 +42,7 @@ class Settings:
             jwks_url=os.environ.get("OAUTH_JWKS_URL", ""),
             audience=os.environ.get("OAUTH_AUDIENCE", ""),
             local_no_auth=os.environ.get("LOCAL_NO_AUTH") == "1",
+            owner_subject=os.environ.get("OWNER_SUBJECT", ""),
         )
 
     def project_path(self, project: str) -> Path:

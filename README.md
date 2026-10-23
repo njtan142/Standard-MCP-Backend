@@ -30,21 +30,27 @@ LOCAL_NO_AUTH=1 uv run uvicorn app.main:create_app --factory --host 127.0.0.1 --
 
 Connect a local MCP client to `http://127.0.0.1:8000/finance/mcp`. The first local MCP request initializes `data/finance.sqlite3`. Any valid project path works locally. `GET /health` is a liveness check and does not create or inspect project databases. Never expose LOCAL_NO_AUTH mode through a tunnel; it is exclusively for a loopback-bound development process. Production Compose does not enable it or publish backend ports.
 
-## OAuth and project access
+## OAuth and owner access (no Auth0 roles required)
 
 ChatGPT → ngrok HTTPS tunnel → Python MCP resource server → per-project SQLite.
 
-An external OAuth authorization server handles sign-in and consent. Python validates RS256 JWT access tokens against configured JWKS, requiring expiry, issuer, audience, subject, and scopes. Configure a shared API identifier as `OAUTH_AUDIENCE`; it is validated independently of project resource URLs.
+An external OAuth authorization server handles sign-in and consent. Python validates RS256 JWT access tokens against the configured JWKS and requires expiry, issuer, audience, and subject. `OAUTH_AUDIENCE` is the API identifier configured at your provider, independent of project resource URLs.
 
-For your private deployment, grant your owner account `skills:read` and `projects:manage` once at the authorization server. This lets that account automatically create and access any project without registering individual project scopes. Configure these two API permissions in Auth0 and assign them only to trusted owners through RBAC. Do not grant `projects:manage` to untrusted users.
+The backend then compares the verified token's `sub` exactly against `OWNER_SUBJECT`. Only that owner can automatically create and access any project. A different user's otherwise valid token is rejected before database creation, even if it claims administrative scopes. Remote startup fails if OWNER_SUBJECT is absent. No Auth0 roles, RBAC, or custom permissions are required; any permissions created during earlier setup can be left unused. Project-specific grants and multi-user access are not supported in this single-owner mode.
 
-For restricted access later, tokens can instead carry `skills:read` and `project:finance` (or the appropriate project name). Such tokens can create/access that project only. The backend still enforces project grants; knowing a URL does not grant access. Users authorized for the same project share its complete dataset; row-level isolation is not implemented.
+### Auth0 setup
 
-Protected-resource metadata is exposed at `/.well-known/oauth-protected-resource/finance/mcp` (and equivalent paths for any valid project name). Unauthenticated requests advertise the correct metadata URL. Configure your provider and ChatGPT client registration for these resource URLs and the `skills:read projects:manage` scopes advertised in discovery. Real provider compatibility, JWKS retrieval, and ChatGPT sign-in remain to be validated. This application is not an authorization server; GitHub access tokens or OIDC ID tokens are not substitutes for access tokens issued for this API.
+1. Keep the `Standard MCP Backend` API with identifier `https://tough-jay-refined.ngrok-free.app` and RS256 signing. RBAC and roles are not needed for this setup.
+2. Under **User Management → Users**, create an application login user if one does not exist. Your Auth0 dashboard account is separate. Open the user and copy its **User ID** (for example `auth0|...`) to `OWNER_SUBJECT` in your local `.env`. It is an identifier, not a password. Use the exact ID for the identity you will sign in with; switching identity providers can produce another ID.
+3. Create a **Regular Web Application** named `ChatGPT MCP`. Keep its client secret private. Configure the exact callback URL provided by ChatGPT's custom app setup/current documentation in **Allowed Callback URLs**. Client ID/secret belong in ChatGPT's OAuth connection fields, not the backend image.
+4. Set the tenant's **Default Audience** to the API identifier, so authorization flows that omit Auth0's audience parameter still receive an access token for this API. If that setting is not available in your dashboard, resolve how to request the API audience before testing the connection.
+5. Set OAUTH_ISSUER to your exact Auth0 issuer URL including the trailing slash, OAUTH_JWKS_URL to its `/.well-known/jwks.json` endpoint, and OAUTH_AUDIENCE to the API identifier. Use the owner application account when ChatGPT prompts you to sign in.
+
+Protected-resource metadata is exposed at `/.well-known/oauth-protected-resource/finance/mcp` and equivalent paths for any valid project. It advertises the issuer and resource, with no custom scope requirement. Unauthenticated requests include the correct metadata URL. Real Auth0/ChatGPT sign-in and provider discovery remain unverified; troubleshoot those before claiming the public connection works. GitHub access tokens and OIDC ID tokens are not substitutes for API access tokens.
 
 ## Docker Compose and ngrok
 
-1. Copy `.env.example` to `.env`. Your hostname is prefilled as `tough-jay-refined.ngrok-free.app`. Set the OAuth issuer/JWKS/audience and ngrok authtoken locally. No project list is required. Never commit credentials or paste them into chat.
+1. Copy `.env.example` to `.env`. Your hostname is prefilled as `tough-jay-refined.ngrok-free.app`. Set the OAuth issuer/JWKS/audience, OWNER_SUBJECT, and ngrok authtoken locally. No project list is required. Never commit credentials or paste them into chat.
 2. Use the ngrok account that owns that dev domain. The sidecar runs `ngrok http --url=tough-jay-refined.ngrok-free.app http://backend:8000`, forwarding all project and metadata paths while preserving the public Host header. Avoid running a second tunnel competing for the same domain.
 3. Run `docker compose up --build -d`. Inspect `docker compose logs backend tunnel` for startup issues; do not share logs containing secrets.
 4. Verify public `/health`, project metadata, and an unauthenticated 401 at `/finance/mcp`. Add `https://tough-jay-refined.ngrok-free.app/finance/mcp` as the ChatGPT connection and complete OAuth sign-in. Verify `about` and `list_skills` after sign-in. Add other projects as separate ChatGPT connections.
@@ -56,7 +62,7 @@ SQLite files persist in the `workspace-data` Docker volume. Never run `docker co
 
 ## Validation and remaining milestones
 
-Automated tests exercise MCP initialization, discovery, calls, resources, OAuth metadata, invalid-token rejection, per-project scopes, isolated registries, automatic provisioning, denied-request non-provisioning, reconnect persistence, and unsafe project names. Local live HTTP client checks are run separately. Real tunnel and ChatGPT tests need external credentials and provider setup.
+Automated tests exercise MCP initialization, discovery, calls, resources, OAuth metadata, invalid-token rejection, owner authorization, isolated registries, automatic provisioning, denied-request non-provisioning, reconnect persistence, and unsafe project names. Local live HTTP client checks are run separately. Real tunnel and ChatGPT tests need external credentials and provider setup.
 
 The cloud Docker builder has previously failed package-registry DNS resolution. A temporary equivalent image using hash-verified downloaded wheels validated the non-root container; the standard online Dockerfile must still run on a builder with working DNS. CI includes that build but has not been executed on GitHub here.
 
