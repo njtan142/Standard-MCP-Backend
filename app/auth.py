@@ -58,7 +58,14 @@ class OwnerVerifier:
         access = await self.verifier.verify_token(token)
         if access is None:
             return None
-        if access.subject != self.owner_subject:
+        # Full configured subjects are provider-specific; bare IDs match the
+        # user-ID portion after the first provider separator.
+        subject = access.subject
+        candidate = subject
+        if isinstance(subject, str) and "|" not in self.owner_subject:
+            provider, separator, user_id = subject.partition("|")
+            candidate = user_id if separator and provider else subject
+        if not candidate or candidate != self.owner_subject:
             logger.warning("OAuth rejected: signed-in user does not match OWNER_SUBJECT")
             if self.debug_user_ids:
                 logger.warning("OAuth owner diagnostic: signed_in_user_id=%r configured_owner_id=%r", access.subject, self.owner_subject)

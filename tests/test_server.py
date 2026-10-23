@@ -250,3 +250,23 @@ def test_invalid_token_never_logs_user_id(tmp_path, signing, caplog):
         assert client.post("/mcp?project=finance", headers={"Authorization": "Bearer " + signing(sub="unverified-user", aud="wrong")}, json={}).status_code == 401
     assert "signed_in_user_id" not in caplog.text
     assert "unverified-user" not in caplog.text
+
+
+@pytest.mark.parametrize("owner,subject,allowed", [
+    ("12345", "google-oauth2|12345", True),
+    ("12345", "auth0|12345", True),
+    ("12345", "12345", True),
+    ("12345", "google-oauth2|67890", False),
+    ("12345", "google-oauth2|012345", False),
+    ("12345", "google-oauth2|prefix|12345", False),
+    ("12345", "|12345", False),
+    ("google-oauth2|12345", "google-oauth2|12345", True),
+    ("google-oauth2|12345", "auth0|12345", False),
+    ("google-oauth2|12345", "12345", False),
+])
+def test_owner_id_matching(tmp_path, signing, owner, subject, allowed):
+    settings = Settings("https://workspace.example", str(tmp_path), "https://issuer.example/", "https://issuer.example/jwks", "https://workspace.example/mcp", owner_subject=owner)
+    with TestClient(create_app(settings), base_url=settings.public_url) as client:
+        response = client.post("/mcp?project=finance", headers={"Authorization": "Bearer " + signing(sub=subject), "Accept": "application/json, text/event-stream"}, json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+        assert response.status_code == (200 if allowed else 401)
+        assert (tmp_path / "finance.sqlite3").exists() is allowed

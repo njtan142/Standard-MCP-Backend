@@ -32,7 +32,7 @@ class Settings:
             if not self.audience:
                 raise ValueError("OAUTH_AUDIENCE is required")
             if not self.owner_subject or self.owner_subject != self.owner_subject.strip():
-                raise ValueError("OWNER_SUBJECT must be the exact OAuth owner user ID")
+                raise ValueError("OWNER_SUBJECT must be a nonempty owner user ID without surrounding whitespace")
 
     @classmethod
     def from_env(cls):
