@@ -39,7 +39,7 @@ def test_auth_and_mcp(tmp_path, signing):
         initialized = call("initialize", {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "test", "version": "1"}})
         assert initialized.status_code == 200, initialized.text
         tools = call("tools/list").json()["result"]["tools"]
-        assert {t["name"] for t in tools} == {"about", "list_skills", "get_skill", "create_skill", "update_skill", "delete_skill", "db_schema", "db_query", "db_execute", "export_sql", "import_sql", "db_migrate"}
+        assert {t["name"] for t in tools} == {"remember", "recall", "forget", "about", "list_skills", "get_skill", "create_skill", "update_skill", "delete_skill", "db_schema", "db_query", "db_execute", "export_sql", "import_sql", "db_migrate"}
         result = call("tools/call", {"name": "about", "arguments": {}}).json()["result"]
         assert "No enabled skills" in result["content"][0]["text"]
         assert not result.get("isError")
@@ -185,7 +185,7 @@ def test_query_project_connections(tmp_path, signing):
             assert client.post(url, headers=headers, json=body).status_code == 200
             assert (tmp_path / f"{project}.sqlite3").is_file()
             listed = client.post(url, headers=headers, json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"}).json()
-            assert {tool["name"] for tool in listed["result"]["tools"]} == {"about", "list_skills", "get_skill", "create_skill", "update_skill", "delete_skill", "db_schema", "db_query", "db_execute", "export_sql", "import_sql", "db_migrate"}
+            assert {tool["name"] for tool in listed["result"]["tools"]} == {"remember", "recall", "forget", "about", "list_skills", "get_skill", "create_skill", "update_skill", "delete_skill", "db_schema", "db_query", "db_execute", "export_sql", "import_sql", "db_migrate"}
             result = client.post(url, headers=headers, json={"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "about", "arguments": {}}}).json()["result"]
             assert f"Project: {project}" in result["content"][0]["text"]
         from app.database import SkillRegistry
@@ -402,3 +402,37 @@ def test_mcp_merge_preview_apply_and_owner_boundary(tmp_path, signing):
         assert call(args).json()['result']['structuredContent']['replayed']
         target=SkillRegistry(str(settings.project_path('finance')))
         assert target.get_skill('merge.example')['content']=='# Instructions'
+
+
+def test_memory_mcp_lifecycle_authorization_and_project_isolation(tmp_path, signing, caplog):
+    settings=Settings('https://workspace.example',str(tmp_path),'https://issuer.example/','https://issuer.example/jwks','https://workspace.example/mcp',owner_subject='user',log_level='DEBUG')
+    headers={'Authorization':'Bearer '+signing(),'Accept':'application/json, text/event-stream'}
+    private='PRIVATE_LOAN_PREFERENCE_DO_NOT_LOG'
+    with TestClient(create_app(settings),base_url=settings.public_url) as client:
+        def call(tool,arguments,project='finance',authorization=headers):
+            return client.post(f'/mcp?project={project}',headers=authorization,json={'jsonrpc':'2.0','id':1,'method':'tools/call','params':{'name':tool,'arguments':arguments}})
+        args={'name':'loan.schedule','subject':'loan:123','content':private}
+        denied=call('remember',args,project='denied',authorization={**headers,'Authorization':'Bearer '+signing(sub='other')})
+        assert denied.status_code==401
+        assert not (tmp_path/'denied.sqlite3').exists()
+        saved=call('remember',args).json()['result']
+        assert saved['structuredContent']['version']==1
+        assert private in saved['content'][0]['text']
+        assert call('recall',{},project='other').json()['result']['structuredContent']['memories']==[]
+        recalled=call('recall',{'subject':'loan:123'}).json()['result']['structuredContent']
+        assert recalled['memories'][0]['content']==private
+        assert call('remember',{**args,'expected_version':2}).json()['result']['isError']
+        assert call('remember',{**args,'expected_version':True}).json()['result']['isError']
+        updated=call('remember',{**args,'content':'Use the 15th','expected_version':1}).json()['result']['structuredContent']
+        assert updated['version']==2
+        assert call('forget',{'name':'loan.schedule','expected_version':2}).json()['result']['structuredContent']['retired']
+        assert call('recall',{}).json()['result']['structuredContent']['memories']==[]
+        history=call('recall',{'name':'loan.schedule','history':True,'include_retired':True}).json()['result']['structuredContent']
+        assert [m['version'] for m in history['memories']]==[3,2,1]
+        assert call('db_query',{'sql':'SELECT * FROM system_memories'}).json()['result']['isError']
+        assert call('db_migrate',{'migration_id':'forbidden-memory','statements':[{'sql':'DROP TABLE system_memories'}]}).json()['result']['isError']
+        about=call('about',{}).json()['result']['content'][0]['text']
+        assert 'recall relevant' in about and 'not automatic scheduling' in about
+        assert private not in caplog.text
+        audit=call('db_query',{'sql':'SELECT actor FROM audit_mutations'}).json()['result']['structuredContent']['rows']
+        assert audit==[{'actor':'user'}]*3

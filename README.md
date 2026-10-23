@@ -1,6 +1,6 @@
 # Standard MCP Backend
 
-A Python, SQLite-backed foundation for project-specific, skill-driven MCP services. The server exposes `about`, `list_skills`, `get_skill`, `create_skill`, `update_skill`, and `delete_skill`, `db_schema`, `db_query`, `db_execute`, and `db_migrate`, plus a `workspace://about` resource over standard Streamable HTTP. Skill changes are stored in the selected project’s SQLite database. Skill tools advertise explicit output schemas and return structured fields alongside text content, including the complete Markdown from get_skill.
+A Python, SQLite-backed foundation for project-specific, skill-driven MCP services. The server exposes `about`, `list_skills`, `get_skill`, `create_skill`, `update_skill`, and `delete_skill`, `db_schema`, `db_query`, `db_execute`, and `db_migrate`, `remember`, `recall`, and `forget`, plus SQL export/import and a `workspace://about` resource over standard Streamable HTTP. Skill changes are stored in the selected project’s SQLite database. Skill tools advertise explicit output schemas and return structured fields alongside text content, including the complete Markdown from get_skill.
 
 ## Projects
 
@@ -20,7 +20,7 @@ The `/mcp` endpoint requires exactly one `project` query parameter; missing, bla
 
 ## Manage skills from ChatGPT
 
-After pulling updates, rebuild locally with `docker compose up --build -d backend`. Refresh the custom app's tools (reconnect if needed) and start a new chat with the app selected. Discovery should show twelve tools (six skill tools, four database tools, and SQL export/import):
+After pulling updates, rebuild locally with `docker compose up --build -d backend`. Refresh the custom app's tools (reconnect if needed) and start a new chat with the app selected. Discovery should show fifteen tools (six skill/discovery tools, three memory tools, four database tools, and SQL export/import):
 
 | Tool | Arguments | Behavior |
 | --- | --- | --- |
@@ -101,6 +101,32 @@ uv export --locked --no-dev --no-emit-project --output-file requirements.txt
 ```
 
 Commit both files when intentionally updating dependencies and rerun tests/builds.
+
+## Project memory
+
+Memory stores user preferences and decisions shared by every authorized client of the same project, independently of skill instructions and application records. For example, remember that a particular loan belongs in the mid-month calculation without changing the loan's actual contractual due date. The agent must clarify ambiguous requests before saving a preference. It should recall relevant memories before a workflow, follow applicable skills, and use SQLite for financial facts and calculations. Memory is context, not permission to act or an instruction that overrides the current user.
+
+| Tool | Arguments | Behavior |
+| --- | --- | --- |
+| `remember` | `name`, `subject`, `content`, optional `effective_from`, `expected_version` | Creates a preference or appends a revision |
+| `recall` | Optional `name`, `subject`, `search`, `include_retired`, `history`, `limit`, `offset` | Finds current preferences or revision history |
+| `forget` | `name`, `expected_version` | Appends a retirement revision; default recall hides it |
+
+Example prompt: “Remember that loan:123 should be included in my mid-month calculations, starting November 1, 2026. This is a calculation preference, not a payment due-date change.” The agent could call:
+
+```json
+{"name":"loan.123.calculation-period","subject":"loan:123","content":"Include this loan in mid-month calculations. Its contractual payment due date is unchanged.","effective_from":"2026-11-01"}
+```
+
+Use `recall(subject="loan:123")` before calculating. Subjects match exact identifiers; `search` matches a literal, case-insensitive substring of name, subject, or content. Filters combine with AND. Default recall returns only the latest, non-retired revision of each name. Results are ordered by name/version, at most 20 per page; check `truncated` and use `next_offset`. Search does not perform semantic/vector matching. `effective_from` is an ISO calendar date for the agent to interpret; it does not schedule changes, automatically filter results, or make older revisions current until that date. Ask the user about conflicting or unclear preferences.
+
+New names omit `expected_version`. Before changing or reactivating an existing memory, recall its latest revision (with `include_retired=true` if necessary) and supply its version. Every change appends a revision atomically and audits the operation; stale changes fail instead of overwriting another client's preference. `remember` supplies the full replacement subject/content/date; omitting `effective_from` clears that date. Names use the same 128-character lowercase identifier format as skills; subjects are limited to 256 characters and content to 8192. Nothing is automatically extracted or saved from conversations.
+
+`forget` retires a preference rather than permanently erasing it. `recall(name=..., history=true, include_retired=true)` retrieves its history, including retired revisions. Historical revisions are not active guidance. Avoid storing credentials or secrets as memories. Logs record tool names, versions, and content length, not memory contents. Generic SQL tools cannot read or modify internal memory tables.
+
+Existing project databases gain an empty `system_memories` table on authorized access; existing skills and financial records remain unchanged. Full SQL exports/restores include memory revisions. Backups predating this feature import with an empty memory table. Merge imports include missing memory revisions and block divergent values for the same name/version; the highest version becomes current, including a retirement revision. Current audit history remains intact. Review imported preferences as well as application records before applying. Older backend versions cannot import new snapshots containing the memory table; keep the upgraded backend with your backups.
+
+After deployment, refresh the app tools in ChatGPT and Gemini so all three memory tools are discovered. No new environment variables or OAuth settings are required.
 
 ## Build locally, publish to Docker Hub, run on EC2
 
@@ -241,12 +267,12 @@ This copies the stopped container's original volume contents, including SQLite j
 
 ## Download and upload full project SQL
 
-Refresh the custom app's tools after upgrading. There are twelve tools, including:
+Refresh the custom app's tools after upgrading. There are fifteen tools, including:
 
 - `export_sql()`: consistent full-project SQL snapshot and a private download link.
 - `import_sql()`: opens a private upload flow; `import_sql(import_id=...)` validates/previews; `import_sql(import_id=..., apply=true)` restores after explicit user authorization.
 
-Ask ChatGPT: “Export this entire project as a downloadable SQL file.” Open the returned link in your browser to download `finance.sql` (or the selected project name). It contains the project schema, skills and versions, application records, audit history, and retry/restore receipts. It excludes OAuth configuration, other projects, and transfer capability credentials.
+Ask ChatGPT: “Export this entire project as a downloadable SQL file.” Open the returned link in your browser to download `finance.sql` (or the selected project name). It contains the project schema, skills and versions, memory revisions, application records, audit history, and retry/restore receipts. It excludes OAuth configuration, other projects, and transfer capability credentials.
 
 To restore, ask: “Prepare a SQL upload for this project.” Open the upload link, select the `.sql` file, and upload. The page only stages the file and shows its import ID. Return to ChatGPT and ask it to preview that ID. The preview validates SQL in an isolated in-memory database and makes no project changes. After reviewing it, explicitly authorize the restore. Applying it REPLACES the entire selected project, including current audit history, with the snapshot and appends a new restore audit entry. Snapshot audit history is imported as supplied, not independently authenticated history. Export your current project first if you may need to undo a restore.
 
@@ -254,7 +280,7 @@ To restore, ask: “Prepare a SQL upload for this project.” Open the upload li
 
 Ask ChatGPT: “Prepare a SQL upload in merge mode. Preview the uploaded backup and show conflicts before applying.” Use `import_sql(mode="merge")` to prepare the upload, then `import_sql(import_id=..., mode="merge")` to preview it. The default mode remains `restore` for compatibility; specify `merge` on every merge call.
 
-Merge accepts the same full-project SQL snapshots. It creates missing `data_*` tables and indexes and inserts missing application records and skills. Identical rows are skipped. Existing rows and unrelated tables remain intact. Source audit history and internal retry/migration receipts are excluded; current history and receipts are preserved, and the merge appends one audit entry.
+Merge accepts the same full-project SQL snapshots. It creates missing `data_*` tables and indexes and inserts missing application records, skills, and memory revisions. Identical rows are skipped. Existing rows and unrelated tables remain intact. Source audit history and internal retry/migration receipts are excluded; current history and receipts are preserved, and the merge appends one audit entry.
 
 Different values under the same primary key, UNIQUE conflicts, or invalid foreign-key relationships block the entire merge. Existing table and index definitions must match exactly; use a reviewed `db_migrate` plan for schema differences. Every merged table needs an explicit, non-NULL primary key. Merge never guesses identities or overwrites conflicting records.
 

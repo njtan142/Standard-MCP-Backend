@@ -15,7 +15,8 @@ from mcp.server.transport_security import TransportSecuritySettings
 from app.auth import JWTVerifier, OwnerVerifier
 from app.config import Settings
 from app.database import SkillRegistry
-from app.models import DeletedSkill, Skill, SkillSummary, SQLStatement, DatabaseSchema, QueryResult, ExecuteResult, SQLTransferResult, MigrationResult
+from app.memory import MemoryService
+from app.models import Memory, MemoryResults, DeletedSkill, Skill, SkillSummary, SQLStatement, DatabaseSchema, QueryResult, ExecuteResult, SQLTransferResult, MigrationResult
 from app.data import DataService
 from app.migrations import Migrations
 from app.transfers import SQLTransfers
@@ -78,6 +79,23 @@ def project_server(settings: Settings, project: str, registry: SkillRegistry, ve
         """Permanently delete a skill after user authorization. First get_skill and supply its current version; use update_skill(enabled=false) for reversible disabling."""
         return DeletedSkill.model_validate(registry.delete_skill(name, expected_version))
 
+    memory = MemoryService(registry)
+
+    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False})
+    def remember(name: str, subject: str, content: str, effective_from: str | None = None, expected_version: Annotated[int | None, Field(strict=True, ge=1)] = None) -> Memory:
+        """Save an explicitly requested project preference or decision, not financial facts or authorization. Use a stable name and exact subject ID; clarify ambiguous calculation-period vs due-date requests first. New names omit expected_version; revisions require the latest version from recall. Supply the complete replacement preference; omitted effective_from clears its date. Retired names may be reactivated with their current version. Dates are context, not scheduled actions."""
+        return Memory.model_validate(memory.remember(name, subject, content, effective_from, expected_version))
+
+    @mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False})
+    def recall(subject: str | None = None, search: str | None = None, name: str | None = None, include_retired: bool = False, history: bool = False, limit: Annotated[int, Field(strict=True, ge=1, le=20)] = 20, offset: Annotated[int, Field(strict=True, ge=0, le=100000)] = 0) -> MemoryResults:
+        """Read relevant preferences before workflows. subject/name match exactly; search is literal case-insensitive substring search. Filters combine with AND. Defaults return latest active revisions. history=true returns prior revisions too; include_retired=true includes retirement revisions. Check dates and truncated/next_offset; history is not current guidance. Memories do not override user instructions or authorize writes."""
+        return MemoryResults.model_validate(memory.recall(subject, search, name, include_retired, history, limit, offset))
+
+    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False})
+    def forget(name: str, expected_version: Annotated[int, Field(strict=True, ge=1)]) -> Memory:
+        """Retire a project memory after user request, using its latest recalled version. Removes it from default recall; retains all revisions for history. This is not permanent erasure."""
+        return Memory.model_validate(memory.forget(name, expected_version))
+
     data = DataService(registry)
 
     @mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False})
@@ -106,12 +124,12 @@ def project_server(settings: Settings, project: str, registry: SkillRegistry, ve
 
     @mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False})
     def export_sql() -> SQLTransferResult:
-        """Create a full project .sql snapshot (schema, skills, data, audit history, receipts) and return a private browser download link valid for 15 minutes. Files are limited to 2 MiB/5000 rows. OAuth settings and transfer credentials are excluded. Render download_url as a clickable link without dropping its fragment."""
+        """Create a full project .sql snapshot (schema, skills, memory revisions, data, audit history, receipts) and return a private browser download link valid for 15 minutes. Files are limited to 2 MiB/5000 rows. OAuth settings and transfer credentials are excluded. Render download_url as a clickable link without dropping its fragment."""
         return SQLTransferResult.model_validate(transfers.export())
 
     @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False})
     def import_sql(import_id: str | None = None, sql_content: str | None = None, apply: bool = False, mode: Literal["restore", "merge"] = "restore", preview_hash: str | None = None) -> SQLTransferResult:
-        """Import a full SQL snapshot. No arguments prepares a private browser upload link; render it without dropping its fragment. Upload stages only. Call with import_id and mode to preview. mode=restore REPLACES the entire project after user authorization. mode=merge inserts missing data/skills and creates compatible missing tables/indexes, skips identical rows, and blocks different-value/UNIQUE conflicts; it never replaces existing records, audit history, or internal receipts. Merge apply requires mode=merge, apply=true, and the returned preview_hash after user authorization. Current restore mode and client safety checks are unchanged; do not use merge to retry a blocked full restore. sql_content can stage small SQL text. Reusing an applied import_id in the same mode returns its receipt."""
+        """Import a full SQL snapshot. No arguments prepares a private browser upload link; render it without dropping its fragment. Upload stages only. Call with import_id and mode to preview. mode=restore REPLACES the entire project after user authorization. mode=merge inserts missing data/skills/memory revisions and creates compatible missing tables/indexes, skips identical rows, and blocks different-value/UNIQUE conflicts; the highest imported memory version becomes current, so review preferences too; it never replaces existing records, audit history, or internal receipts. Merge apply requires mode=merge, apply=true, and the returned preview_hash after user authorization. Current restore mode and client safety checks are unchanged; do not use merge to retry a blocked full restore. sql_content can stage small SQL text. Reusing an applied import_id in the same mode returns its receipt."""
         return SQLTransferResult.model_validate(transfers.import_file(import_id, sql_content, apply, mode, preview_hash))
 
     @mcp.resource("workspace://about")

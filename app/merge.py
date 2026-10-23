@@ -31,7 +31,7 @@ def merge_snapshot(source, destination, registry_path, import_id, source_digest,
         nonlocal steps
         steps += 1000
         return int(steps > 2000000 or time.monotonic() > deadline)
-    source_tables = {row['name']: row['sql'] for row in source.execute("SELECT name,sql FROM sqlite_schema WHERE type='table'") if DATA_TABLE.fullmatch(row['name']) or row['name']=='system_skills'}
+    source_tables = {row['name']: row['sql'] for row in source.execute("SELECT name,sql FROM sqlite_schema WHERE type='table'") if DATA_TABLE.fullmatch(row['name']) or row['name'] in {'system_skills','system_memories'}}
     before_schema = [tuple(row) for row in destination.execute('SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name')]
     footprint = hashlib.sha256()
     counts = []
@@ -46,7 +46,7 @@ def merge_snapshot(source, destination, registry_path, import_id, source_digest,
         if len(conflicts) < 100:
             conflicts.append({'table': table, 'key': {name: json_value(value) for name,value in key.items()}, 'reason': reason})
     def authorize(action, first, second, database, origin):
-        if origin is None and database in {None,'main'} and first=='system_skills' and action in {sqlite3.SQLITE_READ,sqlite3.SQLITE_INSERT}:
+        if origin is None and database in {None,'main'} and first in {'system_skills','system_memories'} and action in {sqlite3.SQLITE_READ,sqlite3.SQLITE_INSERT}:
             return sqlite3.SQLITE_OK
         return DataService.authorizer(affected_tables, write=True)(action,first,second,database,origin)
     try:

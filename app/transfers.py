@@ -13,6 +13,7 @@ from pathlib import Path
 from app.data import DataService, FUNCTIONS
 from app.database import SkillRegistry
 from app.merge import merge_snapshot
+from app.memory import MemoryService
 from app.observability import audit_actor, request_id, trace_operation, event
 
 MAX_SQL_BYTES = 2 * 1024 * 1024
@@ -128,7 +129,7 @@ def split_sql(text):
     return statements
 
 
-SYSTEM_TABLES = {'system_skills', 'audit_mutations', 'system_write_requests', 'system_sql_imports', 'system_migrations'}
+SYSTEM_TABLES = {'system_memories', 'system_skills', 'audit_mutations', 'system_write_requests', 'system_sql_imports', 'system_migrations'}
 
 
 def allowed_table(name):
@@ -276,15 +277,18 @@ class SQLTransfers:
                 if existing:
                     return {**json.loads(existing[0]), 'replayed': True}
                 expected = {row['name']: normalized_schema(row['sql']) for row in destination.execute("SELECT name,sql FROM sqlite_schema WHERE type='table'") if row['name'] in SYSTEM_TABLES}
-                # Older snapshots predate the migration ledger; add that empty
-                # metadata table without changing restored records or skills.
-                if not stage.execute("SELECT 1 FROM sqlite_schema WHERE name='system_migrations'").fetchone():
-                    definition = destination.execute("SELECT sql FROM sqlite_schema WHERE name='system_migrations'").fetchone()
-                    stage.execute(definition[0])
-                    schema = list(stage.execute("SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE sql IS NOT NULL"))
+                # Upgrade older snapshots with empty additive metadata tables;
+                # retain their existing records and skills.
+                for optional in ('system_migrations', 'system_memories'):
+                    if not stage.execute("SELECT 1 FROM sqlite_schema WHERE name=?", (optional,)).fetchone():
+                        definition = destination.execute("SELECT sql FROM sqlite_schema WHERE name=?", (optional,)).fetchone()
+                        stage.execute(definition[0])
+                schema = list(stage.execute("SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE sql IS NOT NULL"))
                 actual = {row['name']: normalized_schema(row['sql']) for row in schema if row['type']=='table' and row['name'] in SYSTEM_TABLES}
                 if actual != expected:
-                    raise ValueError('Full restore requires the current project system-table schemas; use export_sql from the same backend version')
+                    raise ValueError('Project SQL import requires the current project system-table schemas; use export_sql from the same backend version')
+                for row in stage.execute('SELECT * FROM system_memories'):
+                    MemoryService.validate(row['name'], row['subject'], row['content'], row['effective_from'])
                 for row in stage.execute('SELECT name,description,content,enabled,version FROM system_skills'):
                     SkillRegistry.validate_name(row['name'])
                     SkillRegistry.validate_text(row['description'], 'Description', 1000)

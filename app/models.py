@@ -151,3 +151,19 @@ class MigrationResult(BaseModel):
     changed_rows: int
     replayed: bool
     message: str
+
+
+class Memory(BaseModel):
+    name: str
+    version: int
+    subject: str
+    content: str
+    effective_from: str | None
+    retired: bool
+    created_at: str
+
+
+class MemoryResults(BaseModel):
+    memories: list[Memory]
+    truncated: bool
+    next_offset: int | None
