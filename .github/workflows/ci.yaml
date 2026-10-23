@@ -1,0 +1,17 @@
+name: CI
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.23"
+          python-version: "3.12"
+      - run: uv sync --locked
+      - run: uv run pytest -q
+      - run: uv export --locked --no-dev --no-emit-project --output-file requirements.txt && git diff --exit-code -- requirements.txt
+      - run: docker build -t standard-mcp-backend:ci .

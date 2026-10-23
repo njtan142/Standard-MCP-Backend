@@ -1,0 +1,29 @@
+services:
+  backend:
+    image: ${APP_IMAGE:?Set the published backend image including its tag}
+    restart: unless-stopped
+    environment:
+      PUBLIC_URL: ${PUBLIC_URL:?Set the public HTTPS origin without a path}
+      OAUTH_ISSUER: ${OAUTH_ISSUER:?Set the OAuth issuer}
+      OAUTH_JWKS_URL: ${OAUTH_JWKS_URL:?Set the JWKS URL}
+      OAUTH_AUDIENCE: ${OAUTH_AUDIENCE:?Set the access token audience}
+      DATA_DIR: /srv/data
+      PROJECTS_JSON: ${PROJECTS_JSON:?Set the project-to-database JSON registry}
+    volumes:
+      - workspace-data:/srv/data
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+  tunnel:
+    image: ngrok/ngrok:3
+    restart: unless-stopped
+    command: ["http", "--url=${NGROK_DOMAIN:-tough-jay-refined.ngrok-free.app}", "http://backend:8000"]
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN:?Set the ngrok agent authtoken}
+    depends_on:
+      backend:
+        condition: service_healthy
+volumes:
+  workspace-data:
