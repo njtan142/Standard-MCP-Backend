@@ -134,3 +134,7 @@ docker compose -f compose.ec2.yaml logs --tail=50 backend tunnel
 For upgrades, change APP_IMAGE to the new published tag and repeat pull/up. Keep the deployment directory and Compose project name stable so the same database volume is reused. The tunnel makes outbound connections; no inbound application port needs opening in the EC2 security group. Stop any local tunnel using the same ngrok hostname before starting it on EC2.
 
 Docker Hub publication and EC2 deployment are user-operated steps; no registry image has been pushed or EC2 instance deployed by this repository setup.
+
+## Diagnose OAuth 401 responses
+
+Use `docker compose logs -f --tail=30 backend` while reconnecting ChatGPT. A missing-Bearer challenge is normal before sign-in. Repeated 401s alone do not establish that a token was rejected. Diagnostics distinguish a missing Bearer header from token expiry, audience/issuer mismatch, signing-key lookup failure, malformed tokens, and owner mismatch. They never log token values, claim values, or user IDs. If sign-in completes but no authenticated request arrives, inspect Auth0's authorization/token-exchange logs and the ChatGPT connection status. Do not share tokens, authorization codes, client secrets, or unredacted authentication URLs.

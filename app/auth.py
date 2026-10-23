@@ -1,6 +1,9 @@
 import asyncio
+import logging
 import jwt
 from mcp.server.auth.provider import AccessToken
+
+logger = logging.getLogger(__name__)
 
 
 class JWTVerifier:
@@ -20,13 +23,23 @@ class JWTVerifier:
             )
             scope = claims.get("scope", "")
             if not isinstance(scope, str):
+                logger.warning("OAuth rejected: invalid scope claim type")
                 return None
             return AccessToken(
                 token=token, client_id=claims.get("client_id", claims["sub"]),
                 subject=claims["sub"], scopes=scope.split(), expires_at=claims["exp"],
             )
+        except jwt.ExpiredSignatureError:
+            logger.warning("OAuth rejected: token expired")
+        except jwt.InvalidAudienceError:
+            logger.warning("OAuth rejected: audience does not match OAUTH_AUDIENCE")
+        except jwt.InvalidIssuerError:
+            logger.warning("OAuth rejected: issuer does not match OAUTH_ISSUER")
+        except jwt.PyJWKClientError:
+            logger.warning("OAuth rejected: signing key lookup failed; check JWKS URL and outbound connectivity")
         except (jwt.PyJWTError, ValueError, TypeError):
-            return None
+            logger.warning("OAuth rejected: invalid token signature, format, or required claims")
+        return None
 
     async def verify_token(self, token: str):
         return await asyncio.to_thread(self._verify, token)
@@ -42,7 +55,10 @@ class OwnerVerifier:
 
     async def verify_token(self, token: str):
         access = await self.verifier.verify_token(token)
-        if access is None or access.subject != self.owner_subject:
+        if access is None:
+            return None
+        if access.subject != self.owner_subject:
+            logger.warning("OAuth rejected: signed-in user does not match OWNER_SUBJECT")
             return None
         await asyncio.to_thread(self.registry.initialize)
         return access

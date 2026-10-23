@@ -1,9 +1,11 @@
 import asyncio
+import logging
 import re
 from urllib.parse import parse_qs, urlsplit
 
 from fastapi import FastAPI
 from starlette.responses import JSONResponse
+from starlette.datastructures import Headers
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
@@ -97,6 +99,10 @@ def create_app(settings: Settings | None = None):
         except ValueError:
             await JSONResponse({"detail": "Invalid project"}, status_code=400)(scope, receive, send)
             return
+        if not settings.local_no_auth:
+            authorization = Headers(scope=scope).get("authorization", "")
+            if not authorization.lower().startswith("bearer "):
+                logging.getLogger(__name__).warning("OAuth challenge: request has no Bearer authorization header (expected before sign-in)")
         if settings.local_no_auth:
             await asyncio.to_thread(registry.initialize)
         server = project_server(settings, project, registry, verifier, endpoint_path=path)

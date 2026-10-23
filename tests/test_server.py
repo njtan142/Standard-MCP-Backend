@@ -203,3 +203,29 @@ def test_invalid_query_selection_no_provision(tmp_path, signing, url):
     with TestClient(create_app(settings), base_url=settings.public_url) as client:
         assert client.post(url, headers={"Authorization": "Bearer " + signing()}, json={}).status_code == 400
         assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("claims,reason", [
+    ({"aud": "wrong"}, "audience does not match OAUTH_AUDIENCE"),
+    ({"iss": "https://wrong.example/"}, "issuer does not match OAUTH_ISSUER"),
+    ({"exp": 1}, "token expired"),
+    ({"sub": "other-private-user"}, "signed-in user does not match OWNER_SUBJECT"),
+])
+def test_safe_auth_diagnostics(tmp_path, signing, caplog, claims, reason):
+    settings = Settings("https://workspace.example", str(tmp_path), "https://issuer.example/", "https://issuer.example/jwks", "https://workspace.example/mcp", owner_subject="user")
+    token = signing(**claims)
+    with TestClient(create_app(settings), base_url=settings.public_url) as client:
+        response = client.post("/mcp?project=finance", headers={"Authorization": "Bearer " + token}, json={})
+        assert response.status_code == 401
+    assert reason in caplog.text
+    assert token not in caplog.text
+    assert "other-private-user" not in caplog.text
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_missing_bearer_diagnostic(tmp_path, caplog):
+    settings = Settings("https://workspace.example", str(tmp_path), "https://issuer.example/", "https://issuer.example/jwks", "https://workspace.example/mcp", owner_subject="user")
+    with TestClient(create_app(settings), base_url=settings.public_url) as client:
+        assert client.post("/mcp?project=finance", json={}).status_code == 401
+    assert "request has no Bearer authorization header" in caplog.text
+    assert list(tmp_path.iterdir()) == []
