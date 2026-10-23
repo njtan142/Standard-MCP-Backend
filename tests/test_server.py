@@ -1,4 +1,5 @@
 import time
+import json
 from types import SimpleNamespace
 
 import jwt
@@ -38,7 +39,7 @@ def test_auth_and_mcp(tmp_path, signing):
         initialized = call("initialize", {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "test", "version": "1"}})
         assert initialized.status_code == 200, initialized.text
         tools = call("tools/list").json()["result"]["tools"]
-        assert {t["name"] for t in tools} == {"about", "list_skills"}
+        assert {t["name"] for t in tools} == {"about", "list_skills", "get_skill", "create_skill", "update_skill", "delete_skill"}
         result = call("tools/call", {"name": "about", "arguments": {}}).json()["result"]
         assert "No enabled skills" in result["content"][0]["text"]
         assert not result.get("isError")
@@ -184,7 +185,7 @@ def test_query_project_connections(tmp_path, signing):
             assert client.post(url, headers=headers, json=body).status_code == 200
             assert (tmp_path / f"{project}.sqlite3").is_file()
             listed = client.post(url, headers=headers, json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"}).json()
-            assert {tool["name"] for tool in listed["result"]["tools"]} == {"about", "list_skills"}
+            assert {tool["name"] for tool in listed["result"]["tools"]} == {"about", "list_skills", "get_skill", "create_skill", "update_skill", "delete_skill"}
             result = client.post(url, headers=headers, json={"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "about", "arguments": {}}}).json()["result"]
             assert f"Project: {project}" in result["content"][0]["text"]
         from app.database import SkillRegistry
@@ -270,3 +271,46 @@ def test_owner_id_matching(tmp_path, signing, owner, subject, allowed):
         response = client.post("/mcp?project=finance", headers={"Authorization": "Bearer " + signing(sub=subject), "Accept": "application/json, text/event-stream"}, json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
         assert response.status_code == (200 if allowed else 401)
         assert (tmp_path / "finance.sqlite3").exists() is allowed
+
+
+def test_mcp_skill_lifecycle_and_isolation(tmp_path, signing):
+    settings = Settings("https://workspace.example", str(tmp_path), "https://issuer.example/", "https://issuer.example/jwks", "https://workspace.example/mcp", owner_subject="user")
+    headers = {"Authorization": "Bearer " + signing(), "Accept": "application/json, text/event-stream"}
+    markdown = "# Transactions\n\nAsk for missing amounts. Never invent fees.\n"
+    with TestClient(create_app(settings), base_url=settings.public_url) as client:
+        def call(name, arguments, project="finance", auth=headers):
+            response = client.post(f"/mcp?project={project}", headers=auth, json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments}})
+            assert response.status_code == 200, response.text
+            result = response.json()["result"]
+            if not result.get("isError") and name in {"create_skill", "get_skill", "update_skill", "delete_skill"}:
+                result["structuredContent"] = json.loads(result["content"][0]["text"])
+            return result
+        created = call("create_skill", {"name": "finance.transactions", "description": "Record expenses", "content": markdown})
+        assert not created.get("isError")
+        assert created["structuredContent"]["version"] == 1
+        assert created["structuredContent"]["enabled"] is True
+        assert call("get_skill", {"name": "finance.transactions"})["structuredContent"]["content"] == markdown
+        assert "finance.transactions" in call("about", {})["content"][0]["text"]
+        assert "finance.transactions" not in str(call("list_skills", {}, project="other"))
+        assert call("get_skill", {"name": "finance.transactions"}, project="other")["isError"]
+        assert call("create_skill", {"name": "finance.transactions", "description": "Duplicate", "content": "Overwrite"})["isError"]
+        updated = call("update_skill", {"name": "finance.transactions", "expected_version": 1, "enabled": False})
+        assert updated["structuredContent"]["version"] == 2
+        assert updated["structuredContent"]["enabled"] is False
+        assert "finance.transactions" not in str(call("list_skills", {}))
+        assert "finance.transactions" in str(call("list_skills", {"include_disabled": True}))
+        assert "finance.transactions" not in call("about", {})["content"][0]["text"]
+        assert call("get_skill", {"name": "finance.transactions"})["structuredContent"]["content"] == markdown
+        assert call("update_skill", {"name": "finance.transactions", "expected_version": 1, "content": "Stale"})["isError"]
+        assert call("delete_skill", {"name": "finance.transactions", "expected_version": 1})["isError"]
+        assert call("update_skill", {"name": "finance.transactions", "expected_version": 2, "description": "Updated", "enabled": True})["structuredContent"]["version"] == 3
+        response = client.post("/mcp?project=finance", headers={**headers, "Authorization": "Bearer " + signing(sub="other-user")}, json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "delete_skill", "arguments": {"name": "finance.transactions", "expected_version": 3}}})
+        assert response.status_code == 401
+        assert call("get_skill", {"name": "finance.transactions"})["structuredContent"]["version"] == 3
+        assert call("delete_skill", {"name": "finance.transactions", "expected_version": 3})["structuredContent"] == {"name": "finance.transactions", "deleted": True}
+        assert call("get_skill", {"name": "finance.transactions"})["isError"]
+        tools = client.post("/mcp?project=finance", headers=headers, json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"}).json()["result"]["tools"]
+        by_name = {tool["name"]: tool for tool in tools}
+        assert by_name["get_skill"]["annotations"]["readOnlyHint"] is True
+        assert by_name["delete_skill"]["annotations"]["destructiveHint"] is True
+        assert by_name["create_skill"]["annotations"]["readOnlyHint"] is False

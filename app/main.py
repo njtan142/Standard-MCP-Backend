@@ -2,6 +2,8 @@ import asyncio
 import logging
 import re
 from urllib.parse import parse_qs, urlsplit
+from typing import Annotated
+from pydantic import Field
 
 from fastapi import FastAPI
 from starlette.responses import JSONResponse
@@ -40,9 +42,35 @@ def project_server(settings: Settings, project: str, registry: SkillRegistry, ve
         return f"Project: {project}\n\n" + registry.about()
 
     @mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False})
-    def list_skills() -> list[dict]:
-        """List this project's enabled skill names, descriptions, and versions."""
-        return registry.list_skills()
+    def list_skills(include_disabled: bool = False) -> list[dict]:
+        """List skill names, descriptions, versions, and enabled status. Disabled skills are hidden unless include_disabled=true."""
+        return registry.list_skills(include_disabled)
+
+    @mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False})
+    def get_skill(name: str) -> dict:
+        """Retrieve a skill's Markdown and version, including disabled skills for administration. Do not run disabled skills."""
+        return registry.get_skill(name)
+
+    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False})
+    def create_skill(name: str, description: str, content: str) -> dict:
+        """Create an enabled skill in this project. Content is Markdown instructions, not executable code. Existing names are rejected."""
+        return registry.create_skill(name, description, content)
+
+    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False})
+    def update_skill(
+        name: str,
+        expected_version: Annotated[int, Field(strict=True, ge=1)],
+        description: str | None = None,
+        content: str | None = None,
+        enabled: bool | None = None,
+    ) -> dict:
+        """Edit or enable/disable a skill. First get_skill and supply its current version; stale updates fail. Omitted fields are preserved."""
+        return registry.update_skill(name, expected_version, description, content, enabled)
+
+    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False})
+    def delete_skill(name: str, expected_version: Annotated[int, Field(strict=True, ge=1)]) -> dict:
+        """Permanently delete a skill after user authorization. First get_skill and supply its current version; use update_skill(enabled=false) for reversible disabling."""
+        return registry.delete_skill(name, expected_version)
 
     @mcp.resource("workspace://about")
     def about_resource() -> str:

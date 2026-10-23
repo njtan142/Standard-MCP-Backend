@@ -1,6 +1,6 @@
 # Standard MCP Backend
 
-A Python, SQLite-backed foundation for project-specific, skill-driven MCP services. The current milestone exposes read-only `about` and `list_skills` tools and a `workspace://about` resource over standard Streamable HTTP.
+A Python, SQLite-backed foundation for project-specific, skill-driven MCP services. The server exposes `about`, `list_skills`, `get_skill`, `create_skill`, `update_skill`, and `delete_skill`, plus a `workspace://about` resource over standard Streamable HTTP. Skill changes are stored in the selected project’s SQLite database.
 
 ## Projects
 
@@ -17,6 +17,25 @@ Add `https://tough-jay-refined.ngrok-free.app/mcp?project=finance` as a ChatGPT 
 Names must start with a lowercase letter and contain only lowercase letters, digits, and hyphens, up to 63 characters. Reserved names and unsafe database paths are rejected. Public metadata discovery, unauthenticated requests, and denied tokens never create databases. SQLite files remain separate per project; future data and audit tools must preserve this separation.
 
 The `/mcp` endpoint requires exactly one `project` query parameter; missing, blank, duplicate, or invalid selection returns 400. Legacy `/{project}/mcp` endpoints remain supported and use the same databases. `PUBLIC_URL` means the HTTPS **origin**, without a trailing slash or path. `DATA_DIR` replaces `DATABASE_PATH`. `PROJECTS_JSON` is no longer used and can be removed from an existing `.env`. Existing `workspace.sqlite3` is left untouched; no data is moved automatically.
+
+## Manage skills from ChatGPT
+
+After pulling updates, rebuild locally with `docker compose up --build -d backend`. Refresh the custom app's tools (reconnect if needed) and start a new chat with the app selected. Discovery should show six tools:
+
+| Tool | Arguments | Behavior |
+| --- | --- | --- |
+| `about` | None | Project instructions and enabled skill directory |
+| `list_skills` | `include_disabled=false` | Names, descriptions, versions, enabled status |
+| `get_skill` | `name` | Full Markdown, enabled status, version, timestamps |
+| `create_skill` | `name`, `description`, `content` | Creates an enabled skill at version 1 |
+| `update_skill` | `name`, `expected_version`, optional `description`, `content`, `enabled` | Applies changes and increments version |
+| `delete_skill` | `name`, `expected_version` | Permanently deletes the skill |
+
+Try: “Create a skill named finance.transactions that instructs you to ask for missing amounts, dates, and categories and never invent them. Then retrieve the saved skill and show its version.”
+
+Skill names are lowercase identifiers with dots, hyphens, or underscores, up to 128 characters. Description and Markdown content must be nonblank and are limited to 1,000 and 65,536 characters respectively. Duplicate creation fails without overwriting. Before editing or deleting, retrieve the latest version; stale changes fail and must be reviewed before retrying. Use `update_skill(enabled=false)` for reversible disabling; disabled content remains retrievable for administration but must not be followed as an active workflow. Names are immutable.
+
+Mutation tools are marked as writes for MCP clients; deletion and updates are marked destructive. Authorization remains owner-only for all tools. No sample skills are installed automatically. Skills store instructions; they do not execute Markdown or add finance tables. Database query/write tools are still pending, so creating a finance skill does not yet enable expense recording.
 
 ## Local development
 
@@ -70,7 +89,7 @@ Automated tests exercise MCP initialization, discovery, calls, resources, OAuth 
 
 The cloud Docker builder has previously failed package-registry DNS resolution. A temporary equivalent image using hash-verified downloaded wheels validated the non-root container; the standard online Dockerfile must still run on a builder with working DNS. CI includes that build but has not been executed on GitHub here.
 
-Next: skill retrieval/CRUD and versioning, authorized generic data operations, audit history, then a complete agent-driven workflow. No application-specific tables or skills are seeded yet.
+Next: authorized generic data operations, audit history, then a complete agent-driven workflow. No application-specific tables or skills are seeded yet.
 
 ## Dependency updates
 
