@@ -102,7 +102,7 @@ def test_project_isolation_and_owner(tmp_path, signing):
             assert metadata["resource"] == f"{settings.public_url}/{project}/mcp"
             assert "scopes_supported" not in metadata
         assert client.post("/unknown/mcp", json=body).status_code == 401
-        assert client.post("/mcp", json=body).status_code == 404
+        assert client.post("/mcp", json=body).status_code == 400
         assert not (tmp_path / "unknown.sqlite3").exists()
 
 
@@ -164,3 +164,42 @@ def test_forged_owner_and_invalid_tokens_do_not_provision(tmp_path, signing):
             response = client.post("/private/mcp", headers={"Authorization": "Bearer " + token, "Accept": "application/json, text/event-stream"}, json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
             assert response.status_code == 401
             assert not (tmp_path / "private.sqlite3").exists()
+
+
+def test_query_project_connections(tmp_path, signing):
+    settings = Settings("https://workspace.example", str(tmp_path), "https://issuer.example/", "https://issuer.example/jwks", "https://workspace.example/mcp", owner_subject="user")
+    body = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "test", "version": "1"}}}
+    headers = {"Authorization": "Bearer " + signing(), "Accept": "application/json, text/event-stream"}
+    with TestClient(create_app(settings), base_url=settings.public_url) as client:
+        denied = client.post("/mcp?project=finance", json=body)
+        assert denied.status_code == 401
+        assert "https://workspace.example/.well-known/oauth-protected-resource/mcp" in denied.headers["www-authenticate"]
+        assert list(tmp_path.iterdir()) == []
+        metadata = client.get("/.well-known/oauth-protected-resource/mcp").json()
+        assert metadata["resource"] == "https://workspace.example/mcp"
+        assert client.post("/mcp?project=finance", headers={**headers, "Authorization": "Bearer " + signing(sub="other")}, json=body).status_code == 401
+        assert list(tmp_path.iterdir()) == []
+        for project in ("finance", "notes"):
+            url = f"/mcp?project={project}"
+            assert client.post(url, headers=headers, json=body).status_code == 200
+            assert (tmp_path / f"{project}.sqlite3").is_file()
+            listed = client.post(url, headers=headers, json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"}).json()
+            assert {tool["name"] for tool in listed["result"]["tools"]} == {"about", "list_skills"}
+            result = client.post(url, headers=headers, json={"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "about", "arguments": {}}}).json()["result"]
+            assert f"Project: {project}" in result["content"][0]["text"]
+        from app.database import SkillRegistry
+        finance = SkillRegistry(str(tmp_path / "finance.sqlite3"))
+        with finance.connect() as connection:
+            connection.execute("INSERT INTO system_skills (name, description, content) VALUES ('finance-only', 'Private', '# Private')")
+        query = {"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {"name": "list_skills", "arguments": {}}}
+        assert "finance-only" in client.post("/mcp?project=finance", headers=headers, json=query).text
+        assert "finance-only" in client.post("/finance/mcp", headers=headers, json=query).text
+        assert "finance-only" not in client.post("/mcp?project=notes", headers=headers, json=query).text
+
+
+@pytest.mark.parametrize("url", ["/mcp", "/mcp?project=", "/mcp?project=../bad", "/mcp?project=%2Ftmp%2Fbad", "/mcp?project=finance&project=notes", "/mcp?project=finance&extra=notes", "/finance/mcp?project=notes"])
+def test_invalid_query_selection_no_provision(tmp_path, signing, url):
+    settings = Settings("https://workspace.example", str(tmp_path), "https://issuer.example/", "https://issuer.example/jwks", "https://workspace.example/mcp", owner_subject="user")
+    with TestClient(create_app(settings), base_url=settings.public_url) as client:
+        assert client.post(url, headers={"Authorization": "Bearer " + signing()}, json={}).status_code == 400
+        assert list(tmp_path.iterdir()) == []
