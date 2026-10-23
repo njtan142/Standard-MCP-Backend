@@ -180,3 +180,21 @@ def test_pre_migration_ledger_sql_snapshot_remains_restorable(transfer):
     assert transfer.registry.get_skill('finance.transactions')['version']==1
     with transfer.registry.connect() as connection:
         assert connection.execute('SELECT count(*) FROM system_migrations').fetchone()[0]==0
+
+
+def test_download_checksum_and_html_upload_rejection(transfer):
+    import hashlib
+    with TestClient(create_app(transfer.settings),base_url=transfer.settings.public_url) as client:
+        exported=transfer.export()
+        token=urlsplit(exported['download_url']).fragment
+        response=client.get('/files/content',headers={'X-Transfer-Token':token,'ngrok-skip-browser-warning':'true'})
+        assert response.status_code==200
+        assert response.headers['content-type'].startswith('application/sql')
+        assert response.headers['x-content-sha256']==hashlib.sha256(response.content).hexdigest()==exported['sha256']
+        prepared=transfer.import_file()
+        upload_token=urlsplit(prepared['upload_url']).fragment
+        warning=b'<!DOCTYPE html><html><body>ERR_NGROK_6024</body></html>'
+        rejected=client.post('/files/upload-content',headers={'X-Transfer-Token':upload_token},content=warning)
+        assert rejected.status_code==400
+        assert 'HTML, not SQL' in rejected.json()['detail']
+        assert transfer.store.lookup(token=upload_token)['payload'] is None

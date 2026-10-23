@@ -74,7 +74,9 @@ class TransferStore:
         if not payload or len(payload) > MAX_SQL_BYTES:
             raise ValueError('SQL upload must be nonempty and at most 2 MiB')
         try:
-            payload.decode('utf-8-sig')
+            text = payload.decode('utf-8-sig')
+            if re.match(r'\s*(?:<!doctype\s+html|<html\b)', text, re.I):
+                raise ValueError('This file contains HTML, not SQL; download a fresh backup after bypassing the tunnel warning')
         except UnicodeDecodeError:
             raise ValueError('Upload must be a UTF-8 SQL text file') from None
         connection = self.connect()

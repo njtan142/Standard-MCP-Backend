@@ -1,4 +1,5 @@
 """Browser file transfer endpoints; capabilities travel in headers, never paths."""
+import hashlib
 from fastapi import APIRouter, Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
 from app.transfers import TransferStore, MAX_SQL_BYTES
@@ -12,10 +13,23 @@ if (!token) {
   status.textContent = 'Missing transfer token. Request a new link from ChatGPT.';
 } else if (mode === 'download') {
   (async () => {
-    const response = await fetch('/files/content', {headers: {'X-Transfer-Token': token}, cache: 'no-store', credentials: 'omit'});
+    const response = await fetch('/files/content', {headers: {'X-Transfer-Token': token, 'ngrok-skip-browser-warning': 'true'}, cache: 'no-store', credentials: 'omit'});
     if (!response.ok) {status.textContent = 'Download unavailable or expired. Request a new export.'; return;}
+    const mediaType = (response.headers.get('Content-Type') || '').split(';')[0].trim().toLowerCase();
+    const filename = response.headers.get('Content-Disposition')?.match(/filename="([a-z][a-z0-9-]{0,62}\.sql)"/)?.[1];
+    const expectedHash = response.headers.get('X-Content-SHA256') || '';
+    if (mediaType !== 'application/sql' || !filename || !/^[a-f0-9]{64}$/.test(expectedHash)) {
+      status.textContent = 'Download blocked: the tunnel returned HTML or an unexpected response, not a SQL backup. Accept the ngrok visitor warning in a normal browser tab, then request a fresh export.'; return;
+    }
     const blob = await response.blob();
-    const filename = response.headers.get('Content-Disposition')?.match(/filename="([^"]+)"/)?.[1] || 'project.sql';
+    if (blob.size > 2097152 || !(await blob.slice(0, 96).text()).startsWith('-- Standard MCP full project SQL v1\n')) {
+      status.textContent = 'Download blocked: this response is not a supported project SQL backup.'; return;
+    }
+    const digest = await crypto.subtle.digest('SHA-256', await blob.arrayBuffer());
+    const actualHash = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+    if (actualHash !== expectedHash) {
+      status.textContent = 'Download blocked: backup checksum verification failed. Request a fresh export.'; return;
+    }
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob); link.download = filename;
     link.textContent = 'Download ' + filename; document.body.appendChild(link);
@@ -30,7 +44,10 @@ if (!token) {
       status.textContent = 'Select a nonempty .sql file of at most 2 MiB.'; return;
     }
     try {
-      const response = await fetch('/files/upload-content', {method: 'POST', headers: {'X-Transfer-Token': token, 'Content-Type': 'application/sql'}, body: file, credentials: 'omit'});
+      const response = await fetch('/files/upload-content', {method: 'POST', headers: {'X-Transfer-Token': token, 'Content-Type': 'application/sql', 'ngrok-skip-browser-warning': 'true'}, body: file, credentials: 'omit'});
+      if (!(response.headers.get('Content-Type') || '').toLowerCase().includes('application/json')) {
+        status.textContent = 'Upload blocked: the tunnel returned an unexpected page. Accept the ngrok visitor warning, then request a fresh upload link.'; return;
+      }
       const result = await response.json();
       status.textContent = response.ok ? 'Uploaded. No project changes were made. Return to ChatGPT to preview import ' + result.import_id + '.' : result.detail;
       if (response.ok) document.getElementById('upload').hidden = true;
@@ -69,7 +86,7 @@ def file_router(settings):
             record = store.lookup(token=token, kind='export')
         except ValueError:
             return JSONResponse({'detail': 'Transfer not found or expired'}, 404, headers=HEADERS)
-        return Response(bytes(record['payload']), media_type='application/sql', headers={**HEADERS, 'Content-Disposition': f'attachment; filename="{record["project"]}.sql"'})
+        return Response(bytes(record['payload']), media_type='application/sql', headers={**HEADERS, 'Content-Disposition': f'attachment; filename="{record["project"]}.sql"', 'X-Content-SHA256': hashlib.sha256(bytes(record['payload'])).hexdigest()})
 
     @router.post('/files/upload-content')
     async def upload(request: Request):
