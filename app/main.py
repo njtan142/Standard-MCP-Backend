@@ -15,6 +15,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from app.auth import JWTVerifier, OwnerVerifier
 from app.config import Settings
 from app.database import SkillRegistry
+from app.models import DeletedSkill, Skill, SkillSummary
 
 
 def project_server(settings: Settings, project: str, registry: SkillRegistry, verifier=None, endpoint_path=None):
@@ -42,19 +43,19 @@ def project_server(settings: Settings, project: str, registry: SkillRegistry, ve
         return f"Project: {project}\n\n" + registry.about()
 
     @mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False})
-    def list_skills(include_disabled: bool = False) -> list[dict]:
+    def list_skills(include_disabled: bool = False) -> list[SkillSummary]:
         """List skill names, descriptions, versions, and enabled status. Disabled skills are hidden unless include_disabled=true."""
-        return registry.list_skills(include_disabled)
+        return [SkillSummary.model_validate(skill) for skill in registry.list_skills(include_disabled)]
 
     @mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False})
-    def get_skill(name: str) -> dict:
+    def get_skill(name: str) -> Skill:
         """Retrieve a skill's Markdown and version, including disabled skills for administration. Do not run disabled skills."""
-        return registry.get_skill(name)
+        return Skill.model_validate(registry.get_skill(name))
 
     @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False})
-    def create_skill(name: str, description: str, content: str) -> dict:
+    def create_skill(name: str, description: str, content: str) -> Skill:
         """Create an enabled skill in this project. Content is Markdown instructions, not executable code. Existing names are rejected."""
-        return registry.create_skill(name, description, content)
+        return Skill.model_validate(registry.create_skill(name, description, content))
 
     @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False})
     def update_skill(
@@ -63,14 +64,14 @@ def project_server(settings: Settings, project: str, registry: SkillRegistry, ve
         description: str | None = None,
         content: str | None = None,
         enabled: bool | None = None,
-    ) -> dict:
+    ) -> Skill:
         """Edit or enable/disable a skill. First get_skill and supply its current version; stale updates fail. Omitted fields are preserved."""
-        return registry.update_skill(name, expected_version, description, content, enabled)
+        return Skill.model_validate(registry.update_skill(name, expected_version, description, content, enabled))
 
     @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False})
-    def delete_skill(name: str, expected_version: Annotated[int, Field(strict=True, ge=1)]) -> dict:
+    def delete_skill(name: str, expected_version: Annotated[int, Field(strict=True, ge=1)]) -> DeletedSkill:
         """Permanently delete a skill after user authorization. First get_skill and supply its current version; use update_skill(enabled=false) for reversible disabling."""
-        return registry.delete_skill(name, expected_version)
+        return DeletedSkill.model_validate(registry.delete_skill(name, expected_version))
 
     @mcp.resource("workspace://about")
     def about_resource() -> str:

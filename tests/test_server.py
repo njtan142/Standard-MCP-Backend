@@ -282,14 +282,14 @@ def test_mcp_skill_lifecycle_and_isolation(tmp_path, signing):
             response = client.post(f"/mcp?project={project}", headers=auth, json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments}})
             assert response.status_code == 200, response.text
             result = response.json()["result"]
-            if not result.get("isError") and name in {"create_skill", "get_skill", "update_skill", "delete_skill"}:
-                result["structuredContent"] = json.loads(result["content"][0]["text"])
             return result
         created = call("create_skill", {"name": "finance.transactions", "description": "Record expenses", "content": markdown})
         assert not created.get("isError")
         assert created["structuredContent"]["version"] == 1
         assert created["structuredContent"]["enabled"] is True
-        assert call("get_skill", {"name": "finance.transactions"})["structuredContent"]["content"] == markdown
+        fetched = call("get_skill", {"name": "finance.transactions"})
+        assert fetched["structuredContent"]["content"] == markdown
+        assert json.loads(fetched["content"][0]["text"])["content"] == markdown
         assert "finance.transactions" in call("about", {})["content"][0]["text"]
         assert "finance.transactions" not in str(call("list_skills", {}, project="other"))
         assert call("get_skill", {"name": "finance.transactions"}, project="other")["isError"]
@@ -300,7 +300,9 @@ def test_mcp_skill_lifecycle_and_isolation(tmp_path, signing):
         assert "finance.transactions" not in str(call("list_skills", {}))
         assert "finance.transactions" in str(call("list_skills", {"include_disabled": True}))
         assert "finance.transactions" not in call("about", {})["content"][0]["text"]
-        assert call("get_skill", {"name": "finance.transactions"})["structuredContent"]["content"] == markdown
+        fetched = call("get_skill", {"name": "finance.transactions"})
+        assert fetched["structuredContent"]["content"] == markdown
+        assert json.loads(fetched["content"][0]["text"])["content"] == markdown
         assert call("update_skill", {"name": "finance.transactions", "expected_version": 1, "content": "Stale"})["isError"]
         assert call("delete_skill", {"name": "finance.transactions", "expected_version": 1})["isError"]
         assert call("update_skill", {"name": "finance.transactions", "expected_version": 2, "description": "Updated", "enabled": True})["structuredContent"]["version"] == 3
@@ -314,3 +316,8 @@ def test_mcp_skill_lifecycle_and_isolation(tmp_path, signing):
         assert by_name["get_skill"]["annotations"]["readOnlyHint"] is True
         assert by_name["delete_skill"]["annotations"]["destructiveHint"] is True
         assert by_name["create_skill"]["annotations"]["readOnlyHint"] is False
+        for name in ("get_skill", "create_skill", "update_skill"):
+            schema = by_name[name]["outputSchema"]
+            assert schema["properties"]["content"]["type"] == "string"
+            assert "content" in schema["required"]
+        assert by_name["delete_skill"]["outputSchema"]["properties"]["deleted"]["type"] == "boolean"
