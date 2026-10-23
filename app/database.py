@@ -2,6 +2,8 @@ import sqlite3
 import re
 from contextlib import contextmanager
 from pathlib import Path
+from app.observability import event, trace_operation
+import logging
 
 
 class SkillRegistry:
@@ -10,15 +12,22 @@ class SkillRegistry:
 
     @contextmanager
     def connect(self):
+        event("database.connection.open", logging.DEBUG)
         connection = sqlite3.connect(self.path)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         try:
             with connection:
                 yield connection
+            event("database.transaction.committed", logging.DEBUG)
+        except Exception as exc:
+            event("database.transaction.rolled_back", logging.WARNING, error_type=type(exc).__name__)
+            raise
         finally:
             connection.close()
+            event("database.connection.closed", logging.DEBUG)
 
+    @trace_operation
     def initialize(self):
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as connection:
@@ -56,6 +65,7 @@ class SkillRegistry:
         result["enabled"] = bool(result["enabled"])
         return result
 
+    @trace_operation
     def list_skills(self, include_disabled=False):
         with self.connect() as connection:
             return [{**dict(row), "enabled": bool(row["enabled"])} for row in connection.execute(
@@ -63,11 +73,13 @@ class SkillRegistry:
                 (int(include_disabled),),
             )]
 
+    @trace_operation
     def get_skill(self, name):
         self.validate_name(name)
         with self.connect() as connection:
             return self.read_skill(connection, name)
 
+    @trace_operation
     def create_skill(self, name, description, content):
         self.validate_name(name)
         self.validate_text(description, "Description", 1000)
@@ -82,6 +94,7 @@ class SkillRegistry:
                 raise ValueError("Skill already exists; use get_skill and update_skill") from exc
             return self.read_skill(connection, name)
 
+    @trace_operation
     def update_skill(self, name, expected_version, description=None, content=None, enabled=None):
         self.validate_name(name)
         self.validate_version(expected_version)
@@ -110,6 +123,7 @@ class SkillRegistry:
                 raise ValueError("Version conflict; call get_skill and review before retrying")
             return self.read_skill(connection, name)
 
+    @trace_operation
     def delete_skill(self, name, expected_version):
         self.validate_name(name)
         self.validate_version(expected_version)

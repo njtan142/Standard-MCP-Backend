@@ -157,3 +157,19 @@ Docker Hub publication and EC2 deployment are user-operated steps; no registry i
 ## Diagnose OAuth 401 responses
 
 Use `docker compose logs -f --tail=30 backend` while reconnecting ChatGPT. A missing-Bearer challenge is normal before sign-in. Repeated 401s alone do not establish that a token was rejected. Diagnostics distinguish a missing Bearer header from token expiry, audience/issuer mismatch, signing-key lookup failure, malformed tokens, and owner mismatch. By default they never log token values, claim values, or user IDs. For owner mismatch only, temporarily set `AUTH_DEBUG_USER_IDS=1` in `.env` and recreate the backend. The next rejected request logs `signed_in_user_id` from the verified token and `configured_owner_id` from the running configuration. These are quoted so hidden whitespace is visible. Tokens are never logged, and invalid tokens never produce a user-ID diagnostic. Confirm the signed-in identity is the intended owner before updating OWNER_SUBJECT. Set the flag back to `0` and recreate the backend after diagnosis. If sign-in completes but no authenticated request arrives, inspect Auth0's authorization/token-exchange logs and the ChatGPT connection status. Do not share tokens, authorization codes, client secrets, or unredacted authentication URLs.
+
+## Verbose backend logging
+
+Set `LOG_LEVEL=DEBUG` in `.env`, then rebuild/recreate the backend. The default is INFO; supported levels are DEBUG, INFO, WARNING, ERROR, and CRITICAL.
+
+```sh
+git pull
+docker compose up --build -d backend
+docker compose logs -f --tail=100 backend
+```
+
+Application lines include a timestamp, level, logger, generated request ID, and selected project. Every HTTP response includes `X-Request-ID`. INFO logs HTTP request start/completion, MCP method/tool names, database operation completion, durations, status codes, byte counts, result counts/versions, and content character counts. Small JSON responses also report whether structured content or tool/protocol errors are present. DEBUG adds project routing, database connections/transactions, signing-token validation progress, and successful owner authorization. Failed operations report exception types without dumping their payloads or exception messages.
+
+Headers, bearer tokens, cookies, tool arguments, skill descriptions, Markdown contents, and raw responses are not logged by application tracing. User IDs remain off unless AUTH_DEBUG_USER_IDS=1 is explicitly enabled. Request-body inspection is capped at 64 KiB and response inspection at 4 KiB; larger messages still pass through intact, with byte totals and timing but reduced metadata. Unknown MCP method/tool strings are logged as `unknown`. Database context follows the request into worker threads. These logs help diagnose operations but are not a durable audit history.
+
+Backend container logs rotate at 10 MiB with three files retained. Your Docker daemon must support the json-file driver used by Compose. For failures, share matching request-ID lines rather than credentials or raw traffic dumps.

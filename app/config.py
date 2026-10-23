@@ -15,8 +15,11 @@ class Settings:
     local_no_auth: bool = False
     owner_subject: str = ""
     auth_debug_user_ids: bool = False
+    log_level: str = "INFO"
 
     def __post_init__(self):
+        if self.log_level not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+            raise ValueError("LOG_LEVEL must be DEBUG, INFO, WARNING, ERROR, or CRITICAL")
         url = urlsplit(self.public_url)
         if url.path or url.query or url.fragment or url.username or not url.hostname:
             raise ValueError("PUBLIC_URL must be an origin without a path or trailing slash")
@@ -45,6 +48,7 @@ class Settings:
             local_no_auth=os.environ.get("LOCAL_NO_AUTH") == "1",
             owner_subject=os.environ.get("OWNER_SUBJECT", ""),
             auth_debug_user_ids=os.environ.get("AUTH_DEBUG_USER_IDS") == "1",
+            log_level=os.environ.get("LOG_LEVEL", "INFO").upper(),
         )
 
     def project_path(self, project: str) -> Path:

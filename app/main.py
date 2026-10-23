@@ -16,6 +16,7 @@ from app.auth import JWTVerifier, OwnerVerifier
 from app.config import Settings
 from app.database import SkillRegistry
 from app.models import DeletedSkill, Skill, SkillSummary
+from app.observability import RequestLoggingMiddleware, configure_logging, event, project_name
 
 
 def project_server(settings: Settings, project: str, registry: SkillRegistry, verifier=None, endpoint_path=None):
@@ -83,10 +84,13 @@ def project_server(settings: Settings, project: str, registry: SkillRegistry, ve
 
 def create_app(settings: Settings | None = None):
     settings = settings or Settings.from_env()
+    configure_logging(settings.log_level)
+    event("application.configured", auth_mode="local_no_auth" if settings.local_no_auth else "owner", log_level=settings.log_level, user_id_diagnostics=settings.auth_debug_user_ids)
     verifier = None if settings.local_no_auth else JWTVerifier(
         settings.issuer, settings.audience, settings.jwks_url
     )
     app = FastAPI(title="Skill Workspaces")
+    app.add_middleware(RequestLoggingMiddleware)
 
     @app.get("/health")
     def health():
@@ -125,6 +129,8 @@ def create_app(settings: Settings | None = None):
             project = legacy[1]
         try:
             registry = SkillRegistry(str(settings.project_path(project)))
+            project_name.set(project)
+            event("project.selected", logging.DEBUG, endpoint="query" if path == "/mcp" else "path")
         except ValueError:
             await JSONResponse({"detail": "Invalid project"}, status_code=400)(scope, receive, send)
             return
