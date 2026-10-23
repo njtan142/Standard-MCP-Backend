@@ -20,7 +20,7 @@ The `/mcp` endpoint requires exactly one `project` query parameter; missing, bla
 
 ## Manage skills from ChatGPT
 
-After pulling updates, rebuild locally with `docker compose up --build -d backend`. Refresh the custom app's tools (reconnect if needed) and start a new chat with the app selected. Discovery should show nine tools (six skill tools and three database tools):
+After pulling updates, rebuild locally with `docker compose up --build -d backend`. Refresh the custom app's tools (reconnect if needed) and start a new chat with the app selected. Discovery should show eleven tools (six skill tools, three database tools, and SQL export/import):
 
 | Tool | Arguments | Behavior |
 | --- | --- | --- |
@@ -81,7 +81,7 @@ ChatGPT previously sent the full legacy project path as its OAuth `resource`, ca
 
 The tunnel only supplies HTTPS transport; no Wrangler or Cloudflare domain is required. Health and resource metadata are public; project skill content is protected by MCP authentication. No REST skill routes are implemented yet.
 
-SQLite files persist in the `workspace-data` Docker volume. Never run `docker compose down -v` unless deleting data intentionally. Backup/restore automation is pending; use SQLite's backup API before deployment upgrades.
+SQLite files persist in the gitignored `./data` directory beside your Compose file, bind-mounted at `/srv/data`. See the migration steps below before switching from the earlier named volume. SQL export/import provides bounded project snapshots; keep an offline backup before a full restore.
 
 ## Validation and remaining milestones
 
@@ -150,7 +150,7 @@ docker compose -f compose.ec2.yaml ps
 docker compose -f compose.ec2.yaml logs --tail=50 backend tunnel
 ```
 
-For upgrades, change APP_IMAGE to the new published tag and repeat pull/up. Keep the deployment directory and Compose project name stable so the same database volume is reused. The tunnel makes outbound connections; no inbound application port needs opening in the EC2 security group. Stop any local tunnel using the same ngrok hostname before starting it on EC2.
+For upgrades, change APP_IMAGE to the new published tag and repeat pull/up. Keep the deployment directory and its `data` folder stable so the same databases are reused. The tunnel makes outbound connections; no inbound application port needs opening in the EC2 security group. Stop any local tunnel using the same ngrok hostname before starting it on EC2.
 
 Docker Hub publication and EC2 deployment are user-operated steps; no registry image has been pushed or EC2 instance deployed by this repository setup.
 
@@ -210,3 +210,49 @@ SQLite's authorizer enforces a default-deny policy. Queries can read physical `d
 Each SQL string is limited to one statement and 16 KiB. Bound scalar parameters are limited to 64 KiB per statement; batches to 256 KiB. SQL work is bounded by a progress limit of approximately one million VM steps or two seconds, plus SQLite's lock timeout. Reads cap the row payload at approximately 256 KiB and report truncation; page with deterministic ORDER BY and filters. BLOB results are encoded as base64 objects. Read/RETURNING statements are not accepted by db_execute. SQL limits may reject expensive queries even if valid.
 
 After updating and refreshing the ChatGPT tools, try: “Inspect the schema, then tell me what information the finance.transactions skill requires before saving an expense. Do not invent a transaction.” When you supply an actual record and authorize saving it, ChatGPT can perform the parameterized write, retrieve it, and inspect its audit entry.
+
+
+## Persistent data in the project directory
+
+Both Compose files bind `./data` to `/srv/data`. All project SQLite files and the internal expiring-transfer store live here. The directory is already gitignored and excluded from Docker build context. No database, SQL upload, or credential is baked into the image.
+
+For a fresh setup, create the directory and configure the host UID/GID before starting Compose:
+
+```sh
+mkdir -p data
+id -u
+id -g
+```
+
+Set `APP_UID` and `APP_GID` in `.env` to those two outputs (on your Mac or, separately, the EC2 host). The backend runs as those IDs so the files belong to your local account. If omitted, the image user IDs 10001:10001 are used, which require matching directory ownership. The bind source must exist; Compose will not silently create a root-owned directory. Do not chmod the directory world-writable.
+
+### Move existing records out of the old named volume
+
+Do this before recreating the backend with the updated bind mount. Do not delete the old volume. If `./data` already has databases, stop and choose a separate backup directory rather than overwriting them.
+
+```sh
+docker compose stop backend
+mkdir -p data
+docker compose cp backend:/srv/data/. ./data/
+```
+
+This copies the stopped container's original volume contents, including SQLite journals if any. On macOS, the copied files normally belong to the invoking user; verify `ls -ln data`. Set APP_UID/APP_GID as above, then run `git pull` and `docker compose up --build -d`. On EC2 use `docker compose -f compose.ec2.yaml ...` and the newly published image. If files belong to another account, correct ownership for the chosen UID/GID before startup. Retain the original named volume until you have verified your skills and records in ChatGPT.
+
+## Download and upload full project SQL
+
+Refresh the custom app's tools after upgrading. There are eleven tools, including:
+
+- `export_sql()`: consistent full-project SQL snapshot and a private download link.
+- `import_sql()`: opens a private upload flow; `import_sql(import_id=...)` validates/previews; `import_sql(import_id=..., apply=true)` restores after explicit user authorization.
+
+Ask ChatGPT: “Export this entire project as a downloadable SQL file.” Open the returned link in your browser to download `finance.sql` (or the selected project name). It contains the project schema, skills and versions, application records, audit history, and retry/restore receipts. It excludes OAuth configuration, other projects, and transfer capability credentials.
+
+To restore, ask: “Prepare a SQL upload for this project.” Open the upload link, select the `.sql` file, and upload. The page only stages the file and shows its import ID. Return to ChatGPT and ask it to preview that ID. The preview validates SQL in an isolated in-memory database and makes no project changes. After reviewing it, explicitly authorize the restore. Applying it REPLACES the entire selected project, including current audit history, with the snapshot and appends a new restore audit entry. Snapshot audit history is imported as supplied, not independently authenticated history. Export your current project first if you may need to undo a restore.
+
+You can also stage small SQL text with `import_sql(sql_content=...)`; it still requires a separate apply call using the returned import ID. The server cannot directly read ChatGPT attachment IDs or your computer's file paths, so the browser upload flow is the reliable route. ChatGPT must render the full upload/download URL, retaining the `#fragment`. The fragment holds the short-lived capability and is sent by browser JavaScript only in a request header; it is not present in HTTP request URLs or ordinary access logs. Anyone with the link can use that specific transfer until it expires; treat it as private. No bearer token needs pasting into the browser.
+
+Links expire after 15 minutes; uploads are accepted once and capped at 2 MiB, 5000 SQL statements, and 32 active transfers across the deployment. Expired payloads are deleted on subsequent transfer operations. Use an offline SQLite backup for larger projects. A successful restore retried with the same import ID returns its receipt instead of applying again. Import IDs are bound to the originating project and verified user. Restoring a snapshot later can replace earlier restore receipts along with all other project state.
+
+Supported snapshots contain current-version system schemas, ordinary `data_*` tables, and indexes. Views, triggers, virtual tables, arbitrary table names, extension loading, file attachment, and PRAGMAs in uploaded SQL are rejected. Different backend schema versions may require an offline migration. SQLite validates integrity and foreign keys before restore. The backup API applies a validated snapshot atomically; project operations are serialized in this single-process deployment to avoid in-flight writes being interleaved with restoration. Run one backend worker; coordinate any external database access yourself.
+
+Local HTTP transfer/restore behavior is tested; ChatGPT's rendering of browser links and real ngrok browser transfers require end-to-end validation after deployment.

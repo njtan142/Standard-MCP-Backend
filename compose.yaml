@@ -2,6 +2,7 @@ services:
   backend:
     build: .
     restart: unless-stopped
+    user: "${APP_UID:-10001}:${APP_GID:-10001}"
     logging:
       driver: json-file
       options:
@@ -17,7 +18,11 @@ services:
       AUTH_DEBUG_USER_IDS: ${AUTH_DEBUG_USER_IDS:-0}
       DATA_DIR: /srv/data
     volumes:
-      - workspace-data:/srv/data
+      - type: bind
+        source: ./data
+        target: /srv/data
+        bind:
+          create_host_path: false
     healthcheck:
       test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
       interval: 10s
@@ -32,5 +37,3 @@ services:
     depends_on:
       backend:
         condition: service_healthy
-volumes:
-  workspace-data:

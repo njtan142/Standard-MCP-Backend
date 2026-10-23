@@ -39,7 +39,7 @@ def test_auth_and_mcp(tmp_path, signing):
         initialized = call("initialize", {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "test", "version": "1"}})
         assert initialized.status_code == 200, initialized.text
         tools = call("tools/list").json()["result"]["tools"]
-        assert {t["name"] for t in tools} == {"about", "list_skills", "get_skill", "create_skill", "update_skill", "delete_skill", "db_schema", "db_query", "db_execute"}
+        assert {t["name"] for t in tools} == {"about", "list_skills", "get_skill", "create_skill", "update_skill", "delete_skill", "db_schema", "db_query", "db_execute", "export_sql", "import_sql"}
         result = call("tools/call", {"name": "about", "arguments": {}}).json()["result"]
         assert "No enabled skills" in result["content"][0]["text"]
         assert not result.get("isError")
@@ -185,7 +185,7 @@ def test_query_project_connections(tmp_path, signing):
             assert client.post(url, headers=headers, json=body).status_code == 200
             assert (tmp_path / f"{project}.sqlite3").is_file()
             listed = client.post(url, headers=headers, json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"}).json()
-            assert {tool["name"] for tool in listed["result"]["tools"]} == {"about", "list_skills", "get_skill", "create_skill", "update_skill", "delete_skill", "db_schema", "db_query", "db_execute"}
+            assert {tool["name"] for tool in listed["result"]["tools"]} == {"about", "list_skills", "get_skill", "create_skill", "update_skill", "delete_skill", "db_schema", "db_query", "db_execute", "export_sql", "import_sql"}
             result = client.post(url, headers=headers, json={"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "about", "arguments": {}}}).json()["result"]
             assert f"Project: {project}" in result["content"][0]["text"]
         from app.database import SkillRegistry

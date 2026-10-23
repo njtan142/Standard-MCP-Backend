@@ -15,8 +15,10 @@ from mcp.server.transport_security import TransportSecuritySettings
 from app.auth import JWTVerifier, OwnerVerifier
 from app.config import Settings
 from app.database import SkillRegistry
-from app.models import DeletedSkill, Skill, SkillSummary, SQLStatement, DatabaseSchema, QueryResult, ExecuteResult
+from app.models import DeletedSkill, Skill, SkillSummary, SQLStatement, DatabaseSchema, QueryResult, ExecuteResult, SQLTransferResult
 from app.data import DataService
+from app.transfers import SQLTransfers
+from app.file_routes import file_router
 from app.observability import RequestLoggingMiddleware, configure_logging, event, project_name
 
 
@@ -92,6 +94,18 @@ def project_server(settings: Settings, project: str, registry: SkillRegistry, ve
         """Atomically execute 1–50 parameterized INSERT/UPDATE/DELETE statements on data_* tables, with audit history. No RETURNING, DDL, or transaction SQL. Use a fresh idempotency_key per intended batch; reuse it only for identical retries. Confirm destructive changes with the user."""
         return ExecuteResult.model_validate(data.execute([statement.model_dump() for statement in statements], idempotency_key))
 
+    transfers = SQLTransfers(settings, project, registry)
+
+    @mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False})
+    def export_sql() -> SQLTransferResult:
+        """Create a full project .sql snapshot (schema, skills, data, audit history, receipts) and return a private browser download link valid for 15 minutes. Files are limited to 2 MiB/5000 rows. OAuth settings and transfer credentials are excluded. Render download_url as a clickable link without dropping its fragment."""
+        return SQLTransferResult.model_validate(transfers.export())
+
+    @mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False})
+    def import_sql(import_id: str | None = None, sql_content: str | None = None, apply: bool = False) -> SQLTransferResult:
+        """Restore a full project SQL snapshot. With no arguments, return a private browser upload link; render upload_url without dropping its fragment. Upload stages a file only. Call with import_id to validate/preview, or sql_content to stage small SQL text. After explicit user authorization call with import_id and apply=true to REPLACE the entire selected project including skills, data, audit history, and receipts. SQL is validated in isolation; invalid input never modifies the live project. Same import_id retries do not reapply a successful restore."""
+        return SQLTransferResult.model_validate(transfers.import_file(import_id, sql_content, apply))
+
     @mcp.resource("workspace://about")
     def about_resource() -> str:
         """Project instructions and skill directory."""
@@ -109,6 +123,7 @@ def create_app(settings: Settings | None = None):
     )
     app = FastAPI(title="Skill Workspaces")
     app.add_middleware(RequestLoggingMiddleware)
+    app.include_router(file_router(settings))
 
     @app.get("/health")
     def health():

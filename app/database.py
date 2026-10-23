@@ -4,6 +4,10 @@ from contextlib import contextmanager
 from pathlib import Path
 from app.observability import event, trace_operation
 import logging
+import threading
+import hashlib
+
+PROJECT_LOCKS = [threading.RLock() for _ in range(64)]
 
 
 class SkillRegistry:
@@ -12,20 +16,22 @@ class SkillRegistry:
 
     @contextmanager
     def connect(self):
-        event("database.connection.open", logging.DEBUG)
-        connection = sqlite3.connect(self.path, cached_statements=0)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        try:
-            with connection:
-                yield connection
-            event("database.transaction.committed", logging.DEBUG)
-        except Exception as exc:
-            event("database.transaction.rolled_back", logging.WARNING, error_type=type(exc).__name__)
-            raise
-        finally:
-            connection.close()
-            event("database.connection.closed", logging.DEBUG)
+        lock = PROJECT_LOCKS[int(hashlib.sha256(str(Path(self.path).resolve()).encode()).hexdigest(), 16) % len(PROJECT_LOCKS)]
+        with lock:
+            event("database.connection.open", logging.DEBUG)
+            connection = sqlite3.connect(self.path, cached_statements=0)
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
+            try:
+                with connection:
+                    yield connection
+                event("database.transaction.committed", logging.DEBUG)
+            except Exception as exc:
+                event("database.transaction.rolled_back", logging.WARNING, error_type=type(exc).__name__)
+                raise
+            finally:
+                connection.close()
+                event("database.connection.closed", logging.DEBUG)
 
     @trace_operation
     def initialize(self):
@@ -58,6 +64,10 @@ class SkillRegistry:
                 params TEXT NOT NULL,
                 changed_rows INTEGER NOT NULL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )""")
+            connection.execute("""CREATE TABLE IF NOT EXISTS system_sql_imports (
+                import_id TEXT PRIMARY KEY,
+                response TEXT NOT NULL
             )""")
             connection.execute("""CREATE TABLE IF NOT EXISTS system_write_requests (
                 idempotency_key TEXT PRIMARY KEY,
@@ -178,5 +188,7 @@ class SkillRegistry:
             "db_execute commits a batch atomically with audit entries; use a unique idempotency_key "
             "per intended batch and reuse it only when retrying the identical batch. "
             "Read audit_mutations with db_query; generic SQL cannot change skills, audit, or schema. "
-            "Verify writes with db_query, and report when results are truncated.\n"
+            "Verify writes with db_query, and report when results are truncated. "
+            "export_sql provides a full project .sql download. import_sql prepares an upload or previews a staged file; "
+            "apply=true replaces the entire project snapshot after explicit user authorization.\n"
         )

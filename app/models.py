@@ -61,3 +61,18 @@ class ExecuteResult(BaseModel):
     batch_id: str
     results: list[StatementResult]
     replayed: bool = False
+
+
+class SQLTransferResult(BaseModel):
+    status: str
+    message: str
+    filename: str | None = None
+    download_url: str | None = None
+    upload_url: str | None = None
+    import_id: str | None = None
+    expires_at: str | None = None
+    byte_count: int | None = None
+    sha256: str | None = None
+    row_count: int | None = None
+    tables: list[str] | None = None
+    replayed: bool = False
